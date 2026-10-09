@@ -103,20 +103,24 @@ export function loadConfig(env = process.env) {
 }
 
 export function loadDatabaseConfig(env = process.env) {
-  const databaseUrl = required(env, 'DATABASE_URL');
-  let database;
-  try {
-    database = new URL(databaseUrl);
-  } catch {
-    throw new Error('DATABASE_URL must be a valid PostgreSQL connection URL.');
+  const databaseHost = required(env, 'DB_HOST');
+  const databasePort = positiveInteger(env, 'DB_PORT', 3306);
+  if (databasePort > 65535) {
+    throw new Error('DB_PORT must be between 1 and 65535.');
   }
-  if (!['postgres:', 'postgresql:'].includes(database.protocol)) {
-    throw new Error('DATABASE_URL must use the postgres or postgresql protocol.');
+  const databaseUser = required(env, 'DB_USER');
+  const databaseName = required(env, 'DB_NAME');
+  const databasePassword = env.DB_PASSWORD;
+  if (typeof databasePassword !== 'string' || databasePassword.length === 0) {
+    throw new Error('Missing required environment variable: DB_PASSWORD');
   }
 
   return {
-    databaseUrl,
-    databaseSsl: env.DATABASE_SSL !== 'false',
+    databaseHost,
+    databasePort,
+    databaseUser,
+    databasePassword,
+    databaseName,
   };
 }
 

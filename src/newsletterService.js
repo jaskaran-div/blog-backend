@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { createUnsubscribeToken, readUnsubscribeToken, isValidVerificationToken } from './tokens.js';
 import { isValidEmail, isValidHtml, normalizeEmail } from './validation.js';
 
@@ -39,26 +40,6 @@ function appendUnsubscribeLink(html, token, siteUrl) {
     : `${html}${footer}`;
 }
 
-function dueNewsletterClaimSql() {
-  return `
-    with due as (
-      select id
-      from public.newsletters
-      where (status = 'scheduled' and send_at <= now())
-         or (status = 'sending' and send_at <= now()
-             and updated_at < now() - ($1::integer * interval '1 minute'))
-      order by send_at, id
-      for update skip locked
-      limit 1
-    )
-    update public.newsletters as newsletter
-    set status = 'sending', updated_at = now()
-    from due
-    where newsletter.id = due.id
-    returning newsletter.id, newsletter.title, newsletter.subject,
-              newsletter.html_content, newsletter.send_at`;
-}
-
 export function createNewsletterService({ pool, emailService, config, logger = console }) {
   async function subscribe(inputEmail) {
     if (typeof inputEmail !== 'string' || !isValidEmail(inputEmail.trim())) {
@@ -68,20 +49,19 @@ export function createNewsletterService({ pool, emailService, config, logger = c
     }
 
     const email = normalizeEmail(inputEmail);
-    const { rows } = await pool.query(
-      `insert into public.subscribers
-         (email, status, verification_token, unsubscribe_token, verified_at, subscribed_at, unsubscribed_at)
-       values ($1, 'active', null, gen_random_uuid(), null, now(), null)
-       on conflict (email) do update
-         set status = 'active',
-             verification_token = null,
-             unsubscribe_token = gen_random_uuid(),
-             verified_at = null,
-             subscribed_at = now(),
-             unsubscribed_at = null
-       where public.subscribers.status in ('pending', 'unsubscribed')
-       returning id, email, status`,
-      [email],
+    const unsubscribeToken = randomUUID();
+    await pool.execute(
+      `INSERT INTO subscribers
+         (id, email, status, verification_token, unsubscribe_token, verified_at, subscribed_at, unsubscribed_at)
+       VALUES (?, ?, 'active', NULL, ?, NULL, CURRENT_TIMESTAMP(3), NULL)
+       ON DUPLICATE KEY UPDATE
+         verification_token = IF(status IN ('pending', 'unsubscribed'), NULL, verification_token),
+         unsubscribe_token = IF(status IN ('pending', 'unsubscribed'), ?, unsubscribe_token),
+         verified_at = IF(status IN ('pending', 'unsubscribed'), NULL, verified_at),
+         subscribed_at = IF(status IN ('pending', 'unsubscribed'), CURRENT_TIMESTAMP(3), subscribed_at),
+         unsubscribed_at = IF(status IN ('pending', 'unsubscribed'), NULL, unsubscribed_at),
+         status = IF(status IN ('pending', 'unsubscribed'), 'active', status)`,
+      [randomUUID(), email, unsubscribeToken, unsubscribeToken],
     );
 
     return { message: 'You are subscribed to the weekly newsletter.' };
@@ -92,17 +72,17 @@ export function createNewsletterService({ pool, emailService, config, logger = c
       return { ok: false };
     }
 
-    const { rowCount } = await pool.query(
-      `update public.subscribers
-       set status = 'active',
-           verified_at = now(),
-           subscribed_at = now(),
-           verification_token = null,
-           unsubscribe_token = gen_random_uuid()
-       where verification_token = $1 and status = 'pending'`,
-      [token],
+    const [result] = await pool.execute(
+      `UPDATE subscribers
+       SET status = 'active',
+           verified_at = CURRENT_TIMESTAMP(3),
+           subscribed_at = CURRENT_TIMESTAMP(3),
+           verification_token = NULL,
+           unsubscribe_token = ?
+       WHERE verification_token = ? AND status = 'pending'`,
+      [randomUUID(), token],
     );
-    return { ok: rowCount === 1 };
+    return { ok: result.affectedRows === 1 };
   }
 
   async function unsubscribe(token) {
@@ -111,25 +91,25 @@ export function createNewsletterService({ pool, emailService, config, logger = c
       return { ok: false };
     }
 
-    const { rowCount } = await pool.query(
-      `update public.subscribers
-       set status = 'unsubscribed',
-           unsubscribed_at = coalesce(unsubscribed_at, now()),
-           verification_token = null
-       where id = $1 and unsubscribe_token = $2 and status = 'active'`,
+    const [result] = await pool.execute(
+      `UPDATE subscribers
+       SET status = 'unsubscribed',
+           unsubscribed_at = COALESCE(unsubscribed_at, CURRENT_TIMESTAMP(3)),
+           verification_token = NULL
+       WHERE id = ? AND unsubscribe_token = ? AND status = 'active'`,
       [tokenClaims.subscriberId, tokenClaims.unsubscribeToken],
     );
 
-    if (rowCount === 1) {
+    if (result.affectedRows === 1) {
       return { ok: true };
     }
 
-    const existing = await pool.query(
-      `select 1 from public.subscribers
-       where id = $1 and unsubscribe_token = $2 and status = 'unsubscribed'`,
+    const [existing] = await pool.execute(
+      `SELECT 1 FROM subscribers
+       WHERE id = ? AND unsubscribe_token = ? AND status = 'unsubscribed'`,
       [tokenClaims.subscriberId, tokenClaims.unsubscribeToken],
     );
-    return { ok: existing.rowCount === 1 };
+    return { ok: existing.length === 1 };
   }
 
   async function sendTestEmail({ to, subject, htmlContent }) {
@@ -163,25 +143,120 @@ export function createNewsletterService({ pool, emailService, config, logger = c
   }
 
   async function claimNextDueNewsletter() {
-    const { rows } = await pool.query(dueNewsletterClaimSql(), [config.staleSendMinutes]);
-    return rows[0] ?? null;
+    const connection = await pool.getConnection();
+    let claimed = false;
+    let connectionDestroyed = false;
+    let lockName;
+    try {
+      await connection.beginTransaction();
+      const skippedIds = [];
+      while (true) {
+        const exclusion = skippedIds.length
+          ? `AND id NOT IN (${skippedIds.map(() => '?').join(', ')})`
+          : '';
+        const [rows] = await connection.execute(
+          `SELECT id, title, subject, html_content, send_at
+           FROM newsletters
+           WHERE ((status = 'scheduled' AND send_at <= CURRENT_TIMESTAMP(3))
+              OR (status = 'sending' AND send_at <= CURRENT_TIMESTAMP(3)
+                  AND updated_at < TIMESTAMPADD(MINUTE, ?, CURRENT_TIMESTAMP(3))))
+             ${exclusion}
+           ORDER BY send_at, id
+           LIMIT 1
+           FOR UPDATE SKIP LOCKED`,
+          [-config.staleSendMinutes, ...skippedIds],
+        );
+        const newsletter = rows[0];
+        if (!newsletter) {
+          await connection.commit();
+          return null;
+        }
+
+        lockName = `newsletter:${newsletter.id}`;
+        const [lockRows] = await connection.execute(
+          'SELECT GET_LOCK(?, 0) AS acquired',
+          [lockName],
+        );
+        if (lockRows[0]?.acquired !== 1) {
+          lockName = undefined;
+          skippedIds.push(newsletter.id);
+          continue;
+        }
+
+        await connection.execute(
+          `UPDATE newsletters
+           SET status = 'sending', updated_at = CURRENT_TIMESTAMP(3)
+           WHERE id = ?`,
+          [newsletter.id],
+        );
+        await connection.commit();
+        claimed = true;
+        return { newsletter, connection, lockName };
+      }
+    } catch (error) {
+      let claimError = error;
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        claimError = new AggregateError([error, rollbackError], 'Newsletter claim transaction failed.');
+      }
+      if (lockName) {
+        try {
+          const [releaseRows] = await connection.execute(
+            'SELECT RELEASE_LOCK(?) AS released',
+            [lockName],
+          );
+          if (releaseRows[0]?.released !== 1) {
+            throw new Error('MySQL newsletter claim lock was not released.');
+          }
+        } catch (releaseError) {
+          connection.destroy();
+          connectionDestroyed = true;
+          claimError = new AggregateError([claimError, releaseError], 'Newsletter claim cleanup failed.');
+        }
+      }
+      throw claimError;
+    } finally {
+      if (!claimed && !connectionDestroyed) {
+        connection.release();
+      }
+    }
+  }
+
+  async function releaseNewsletterClaim(claim) {
+    try {
+      const [rows] = await claim.connection.execute(
+        'SELECT RELEASE_LOCK(?) AS released',
+        [claim.lockName],
+      );
+      if (rows[0]?.released !== 1) {
+        throw new Error('MySQL newsletter claim lock was not released.');
+      }
+    } catch (error) {
+      claim.connection.destroy();
+      throw error;
+    }
+    claim.connection.release();
   }
 
   async function sendOneRecipient(newsletter, subscriber) {
-    const { rows } = await pool.query(
-      `insert into public.newsletter_deliveries
+    await pool.execute(
+      `INSERT INTO newsletter_deliveries
          (newsletter_id, subscriber_id, status, attempts, last_error, updated_at)
-       values ($1, $2, 'sending', 1, null, now())
-       on conflict (newsletter_id, subscriber_id) do update
-         set status = 'sending',
-             attempts = public.newsletter_deliveries.attempts + 1,
-             last_error = null,
-             updated_at = now()
-       where public.newsletter_deliveries.status <> 'sent'
-       returning status`,
+       VALUES (?, ?, 'sending', 1, NULL, CURRENT_TIMESTAMP(3))
+       ON DUPLICATE KEY UPDATE
+         attempts = IF(status = 'sent', attempts, attempts + 1),
+         last_error = IF(status = 'sent', last_error, NULL),
+         status = IF(status = 'sent', status, 'sending'),
+         updated_at = IF(status = 'sent', updated_at, CURRENT_TIMESTAMP(3))`,
       [newsletter.id, subscriber.id],
     );
-    if (rows.length === 0) {
+    const [deliveryRows] = await pool.execute(
+      `SELECT status FROM newsletter_deliveries
+       WHERE newsletter_id = ? AND subscriber_id = ?`,
+      [newsletter.id, subscriber.id],
+    );
+    if (deliveryRows[0]?.status === 'sent') {
       return { failed: false, skipped: true };
     }
 
@@ -197,20 +272,21 @@ export function createNewsletterService({ pool, emailService, config, logger = c
         html,
         text: `${toPlainText(newsletter.html_content)}\n\nUnsubscribe: ${config.apiPublicUrl}/api/newsletter/unsubscribe/${createUnsubscribeToken(subscriber.id, subscriber.unsubscribe_token, config.tokenSecret)}`,
       });
-      await pool.query(
-        `update public.newsletter_deliveries
-         set status = 'sent', sent_at = now(), last_error = null, updated_at = now()
-         where newsletter_id = $1 and subscriber_id = $2`,
+      await pool.execute(
+        `UPDATE newsletter_deliveries
+         SET status = 'sent', sent_at = CURRENT_TIMESTAMP(3), last_error = NULL,
+             updated_at = CURRENT_TIMESTAMP(3)
+         WHERE newsletter_id = ? AND subscriber_id = ?`,
         [newsletter.id, subscriber.id],
       );
       return { failed: false, skipped: false };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      await pool.query(
-        `update public.newsletter_deliveries
-         set status = 'failed', last_error = $3, updated_at = now()
-         where newsletter_id = $1 and subscriber_id = $2`,
-        [newsletter.id, subscriber.id, errorMessage.slice(0, 1000)],
+      await pool.execute(
+        `UPDATE newsletter_deliveries
+         SET status = 'failed', last_error = ?, updated_at = CURRENT_TIMESTAMP(3)
+         WHERE newsletter_id = ? AND subscriber_id = ?`,
+        [errorMessage.slice(0, 1000), newsletter.id, subscriber.id],
       );
       logger.error('Newsletter recipient delivery failed', {
         newsletterId: newsletter.id,
@@ -233,21 +309,21 @@ export function createNewsletterService({ pool, emailService, config, logger = c
     let sentCount = 0;
 
     while (true) {
-      const { rows: subscribers } = await pool.query(
-        `        select subscriber.id, subscriber.email, subscriber.unsubscribe_token
-         from public.subscribers as subscriber
-         where subscriber.status = 'active'
-           and subscriber.id > $2
-           and not exists (
-             select 1
-             from public.newsletter_deliveries as delivery
-             where delivery.newsletter_id = $1
-               and delivery.subscriber_id = subscriber.id
-               and delivery.status = 'sent'
+      const [subscribers] = await pool.execute(
+        `SELECT subscriber.id, subscriber.email, subscriber.unsubscribe_token
+         FROM subscribers AS subscriber
+         WHERE subscriber.status = 'active'
+           AND subscriber.id > ?
+           AND NOT EXISTS (
+             SELECT 1
+             FROM newsletter_deliveries AS delivery
+             WHERE delivery.newsletter_id = ?
+               AND delivery.subscriber_id = subscriber.id
+               AND delivery.status = 'sent'
            )
-         order by subscriber.id
-         limit $3`,
-        [newsletter.id, lastSubscriberId, config.batchSize],
+         ORDER BY subscriber.id
+         LIMIT ?`,
+        [lastSubscriberId, newsletter.id, config.batchSize],
       );
 
       if (subscribers.length === 0) {
@@ -261,18 +337,20 @@ export function createNewsletterService({ pool, emailService, config, logger = c
         failedCount += results.filter((result) => result.failed).length;
         sentCount += results.filter((result) => !result.failed && !result.skipped).length;
       }
-      await pool.query(
-        `update public.newsletters set updated_at = now() where id = $1 and status = 'sending'`,
+      await pool.execute(
+        `UPDATE newsletters SET updated_at = CURRENT_TIMESTAMP(3)
+         WHERE id = ? AND status = 'sending'`,
         [newsletter.id],
       );
     }
 
     const status = failedCount > 0 ? 'failed' : 'sent';
-    await pool.query(
-      `update public.newsletters
-       set status = $2, sent_at = case when $2 = 'sent' then now() else null end, updated_at = now()
-       where id = $1`,
-      [newsletter.id, status],
+    await pool.execute(
+      `UPDATE newsletters
+       SET status = ?, sent_at = CASE WHEN ? = 'sent' THEN CURRENT_TIMESTAMP(3) ELSE NULL END,
+           updated_at = CURRENT_TIMESTAMP(3)
+       WHERE id = ?`,
+      [status, status, newsletter.id],
     );
 
     logger.info('Newsletter send finished', {
@@ -287,23 +365,29 @@ export function createNewsletterService({ pool, emailService, config, logger = c
   async function processDueNewsletters() {
     let claimedCount = 0;
     while (true) {
-      const newsletter = await claimNextDueNewsletter();
-      if (!newsletter) {
+      const claim = await claimNextDueNewsletter();
+      if (!claim) {
         break;
       }
 
       claimedCount += 1;
       try {
-        await sendNewsletter(newsletter);
-      } catch (error) {
-        logger.error('Newsletter campaign failed', {
-          newsletterId: newsletter.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        await pool.query(
-          `update public.newsletters set status = 'failed', sent_at = null, updated_at = now() where id = $1`,
-          [newsletter.id],
-        );
+        try {
+          await sendNewsletter(claim.newsletter);
+        } catch (error) {
+          logger.error('Newsletter campaign failed', {
+            newsletterId: claim.newsletter.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          await pool.execute(
+            `UPDATE newsletters
+             SET status = 'failed', sent_at = NULL, updated_at = CURRENT_TIMESTAMP(3)
+             WHERE id = ?`,
+            [claim.newsletter.id],
+          );
+        }
+      } finally {
+        await releaseNewsletterClaim(claim);
       }
     }
     return claimedCount;

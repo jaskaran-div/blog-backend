@@ -3,7 +3,13 @@ import express from 'express';
 import helmet from 'helmet';
 import { createNewsletterRouter } from './routes/newsletter.js';
 
-export function createApp({ newsletterService, emailService, config, logger = console }) {
+export function createApp({
+  newsletterService,
+  emailService,
+  config,
+  healthCheck = async () => {},
+  logger = console,
+}) {
   const app = express();
 
   app.disable('x-powered-by');
@@ -21,8 +27,14 @@ export function createApp({ newsletterService, emailService, config, logger = co
   }));
   app.use(express.json({ limit: '500kb', strict: true }));
 
-  app.get('/health', (_request, response) => {
-    response.json({ status: 'ok' });
+  app.get('/health', async (_request, response) => {
+    try {
+      await healthCheck();
+      response.json({ status: 'ok' });
+    } catch {
+      logger.error('Application health check failed.');
+      response.status(503).json({ status: 'error' });
+    }
   });
   app.use('/api/newsletter', createNewsletterRouter({
     newsletterService,

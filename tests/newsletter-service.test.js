@@ -4,23 +4,23 @@ import { createNewsletterService } from '../src/newsletterService.js';
 
 const config = {
   apiPublicUrl: 'https://newsletter.example.com',
-  siteUrl: 'https://blog.derivionacademy.in',
+  siteUrl: 'https://site.example.com',
   tokenSecret: 'service-test-token-secret-with-more-than-32-bytes',
   batchSize: 10,
   sendConcurrency: 2,
   staleSendMinutes: 30,
 };
 
-test('new subscriptions are active immediately without sending a confirmation email', async () => {
+test('new subscriptions are active immediately and emails are normalized', async () => {
   const saved = [];
   let emailsSent = 0;
   const pool = {
-    async query(sql, parameters) {
-      assert.match(sql, /insert into public\.subscribers/);
-      assert.match(sql, /values \(\$1, 'active', null, gen_random_uuid\(\), null, now\(\), null\)/);
-      assert.match(sql, /where public\.subscribers\.status in \('pending', 'unsubscribed'\)/);
-      saved.push({ email: parameters[0] });
-      return { rows: [{ id: 'subscriber-id', email: parameters[0], status: 'active' }] };
+    async execute(sql, parameters) {
+      assert.match(sql, /INSERT INTO subscribers/);
+      assert.match(sql, /ON DUPLICATE KEY UPDATE/);
+      assert.match(sql, /status IN \('pending', 'unsubscribed'\)/);
+      saved.push({ email: parameters[1] });
+      return [{ affectedRows: 1 }];
     },
   };
   const service = createNewsletterService({
@@ -37,22 +37,16 @@ test('new subscriptions are active immediately without sending a confirmation em
   assert.equal(result.message, 'You are subscribed to the weekly newsletter.');
 });
 
-test('resubscription activates prior addresses and duplicate active addresses are left unchanged', async () => {
-  let saved = false;
-  let emailsSent = 0;
+test('resubscription uses a conditional MySQL upsert without rotating active subscriptions', async () => {
+  const queries = [];
   const service = createNewsletterService({
     pool: {
-      async query(sql) {
-        assert.match(sql, /status = 'active'/);
-        if (saved) {
-          return { rows: [] };
-        }
-        saved = true;
-        assert.match(sql, /unsubscribe_token = gen_random_uuid\(\)/);
-        return { rows: [{ id: 'subscriber-id', email: 'reader@example.com', status: 'active' }] };
+      async execute(sql, parameters) {
+        queries.push({ sql, parameters });
+        return [{ affectedRows: queries.length === 1 ? 1 : 0 }];
       },
     },
-    emailService: { async sendEmail() { emailsSent += 1; } },
+    emailService: { async sendEmail() {} },
     config,
     logger: { error() {} },
   });
@@ -61,7 +55,10 @@ test('resubscription activates prior addresses and duplicate active addresses ar
   const duplicateResult = await service.subscribe('reader@example.com');
   assert.equal(firstResult.message, 'You are subscribed to the weekly newsletter.');
   assert.equal(duplicateResult.message, 'You are subscribed to the weekly newsletter.');
-  assert.equal(emailsSent, 0);
+  assert.equal(queries.length, 2);
+  assert.match(queries[0].sql, /status = IF\(status IN/);
+  assert.deepEqual(queries[0].parameters.slice(1, 2), ['reader@example.com']);
+  assert.notEqual(queries[0].parameters[2], queries[1].parameters[2]);
 });
 
 test('verification activates a pending subscriber and clears its token', async () => {
@@ -69,12 +66,12 @@ test('verification activates a pending subscriber and clears its token', async (
   let queryParameters;
   const service = createNewsletterService({
     pool: {
-      async query(sql, parameters) {
-        assert.match(sql, /status = 'active'/);
-        assert.match(sql, /verification_token = null/);
-        assert.match(sql, /unsubscribe_token = gen_random_uuid\(\)/);
+      async execute(sql, parameters) {
+        assert.match(sql, /SET status = 'active'/);
+        assert.match(sql, /verification_token = NULL/);
+        assert.match(sql, /unsubscribe_token = \?/);
         queryParameters = parameters;
-        return { rowCount: 1 };
+        return [{ affectedRows: 1 }];
       },
     },
     emailService: {},
@@ -82,27 +79,27 @@ test('verification activates a pending subscriber and clears its token', async (
   });
 
   assert.deepEqual(await service.verify(token), { ok: true });
-  assert.deepEqual(queryParameters, [token]);
+  assert.equal(queryParameters[1], token);
   assert.deepEqual(await service.verify('invalid'), { ok: false });
 });
 
-test('unsubscribe marks a subscriber and is idempotent', async () => {
+test('unsubscribe marks a subscriber and is idempotent using affectedRows', async () => {
   const subscriberId = '4a2e8658-13e8-4e66-a146-66ef051a7e48';
   const unsubscribeNonce = 'fdcb2571-ef39-4c49-aa98-c9a3f9f0a002';
   let updateCount = 0;
   const service = createNewsletterService({
     pool: {
-      async query(sql, parameters) {
-        if (sql.includes('update public.subscribers')) {
+      async execute(sql, parameters) {
+        if (sql.includes('UPDATE subscribers')) {
           assert.match(sql, /status = 'unsubscribed'/);
-          assert.match(sql, /coalesce\(unsubscribed_at, now\(\)\)/);
+          assert.match(sql, /COALESCE\(unsubscribed_at, CURRENT_TIMESTAMP/);
           assert.deepEqual(parameters, [subscriberId, unsubscribeNonce]);
           updateCount += 1;
-          return { rowCount: updateCount === 1 ? 1 : 0 };
+          return [{ affectedRows: updateCount === 1 ? 1 : 0 }];
         }
         assert.match(sql, /status = 'unsubscribed'/);
         assert.deepEqual(parameters, [subscriberId, unsubscribeNonce]);
-        return { rowCount: 1 };
+        return [[{}]];
       },
     },
     emailService: {},

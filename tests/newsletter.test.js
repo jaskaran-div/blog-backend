@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import { createApp } from '../src/app.js';
 import { createEmailService } from '../src/emailService.js';
+import { createGracefulShutdown } from '../src/gracefulShutdown.js';
 import { createNewsletterService } from '../src/newsletterService.js';
 import { createUnsubscribeToken, readUnsubscribeToken } from '../src/tokens.js';
 
@@ -19,9 +20,15 @@ const config = {
   batchSize: 3,
   staleSendMinutes: 30,
 };
+let databaseHealthy = true;
 
 const app = createApp({
   config,
+  healthCheck: async () => {
+    if (!databaseHealthy) {
+      throw new Error('private database error');
+    }
+  },
   logger: { error() {}, info() {} },
   newsletterService: {
     async subscribe(email) {
@@ -73,6 +80,20 @@ test('subscription endpoint validates and returns a safe success response', asyn
     method: 'POST',
     headers: { 'content-type': 'application/json', origin: 'http://localhost:3000' },
     body: JSON.stringify({ email: 'reader@example.com' }),
+  });
+
+  test('health endpoint reflects database readiness without exposing database errors', async () => {
+    const healthy = await fetch(`${baseUrl}/health`);
+    assert.equal(healthy.status, 200);
+    assert.deepEqual(await healthy.json(), { status: 'ok' });
+
+    databaseHealthy = false;
+    const unhealthy = await fetch(`${baseUrl}/health`);
+    assert.equal(unhealthy.status, 503);
+    const healthResponse = await unhealthy.text();
+    assert.deepEqual(JSON.parse(healthResponse), { status: 'error' });
+    assert.doesNotMatch(healthResponse, /private database error/);
+    databaseHealthy = true;
   });
 
   assert.equal(response.status, 200);
@@ -166,6 +187,33 @@ test('SES service retries throttling and sends HTML mail', async () => {
   assert.equal(commands[1].input.Message.Body.Html.Data, '<h1>Hello</h1>');
 });
 
+test('graceful shutdown is idempotent and waits before closing the database pool', async () => {
+  const calls = [];
+  const shutdown = createGracefulShutdown({
+    server: {
+      close(callback) {
+        calls.push('server.close');
+        callback();
+      },
+    },
+    scheduledJob: { stop() { calls.push('cron.stop'); } },
+    pool: { async end() { calls.push('pool.end'); } },
+    async waitForNewsletterProcessing() { calls.push('newsletter.wait'); },
+    logger: { info() {}, error() {} },
+  });
+
+  const firstShutdown = shutdown('SIGTERM');
+  const secondShutdown = shutdown('SIGINT');
+  assert.equal(secondShutdown, firstShutdown);
+  await firstShutdown;
+  assert.deepEqual(calls, [
+    'cron.stop',
+    'server.close',
+    'newsletter.wait',
+    'pool.end',
+  ]);
+});
+
 test('scheduled campaigns send only the active recipients in bounded batches', async () => {
   const subscribers = [
     { id: '00000000-0000-4000-8000-000000000001', email: 'one@example.com', unsubscribe_token: 'fdcb2571-ef39-4c49-aa98-c9a3f9f0a001' },
@@ -179,58 +227,64 @@ test('scheduled campaigns send only the active recipients in bounded batches', a
   let maxSimultaneous = 0;
 
   const pool = {
-    async query(sql, parameters = []) {
-      if (sql.includes('with due as')) {
-        if (claimed) return { rows: [] };
-        claimed = true;
-        return {
-          rows: [{
-            id: 'newsletter-id',
-            title: 'Weekly Market Update',
-            subject: 'This Week in Financial Markets',
-            html_content: '<html><body><h1>Market update</h1></body></html>',
-          }],
-        };
-      }
-
-      if (sql.includes('select subscriber.id, subscriber.email')) {
+    async execute(sql, parameters = []) {
+      if (sql.includes('SELECT subscriber.id, subscriber.email')) {
         assert.match(sql, /subscriber\.status = 'active'/);
-        const [, lastId, limit] = parameters;
+        const [lastId, , limit] = parameters;
         const rows = subscribers
-          .filter((subscriber) => subscriber.id > lastId && !deliveries.has(subscriber.id))
+          .filter((subscriber) => subscriber.id > lastId && deliveries.get(subscriber.id) !== 'sent')
           .slice(0, limit);
-        return { rows };
+        return [rows];
       }
-
-      if (sql.includes('insert into public.newsletter_deliveries')) {
+      if (sql.includes('INSERT INTO newsletter_deliveries')) {
         const [, subscriberId] = parameters;
-        if (deliveries.get(subscriberId) === 'sent') return { rows: [] };
-        deliveries.set(subscriberId, 'sending');
-        return { rows: [{ status: 'sending' }] };
+        if (deliveries.get(subscriberId) !== 'sent') {
+          deliveries.set(subscriberId, 'sending');
+        }
+        return [{ affectedRows: 1 }];
       }
-
-      if (sql.includes("set status = 'sent'")) {
+      if (sql.includes('SELECT status FROM newsletter_deliveries')) {
+        const [, subscriberId] = parameters;
+        return [[{ status: deliveries.get(subscriberId) }]];
+      }
+      if (sql.includes("SET status = 'sent'")) {
         const [, subscriberId] = parameters;
         deliveries.set(subscriberId, 'sent');
-        return { rows: [], rowCount: 1 };
+        return [{ affectedRows: 1 }];
       }
-
-      if (sql.includes("set status = 'failed'")) {
+      if (sql.includes("SET status = 'failed'")) {
         const [, subscriberId] = parameters;
         deliveries.set(subscriberId, 'failed');
-        return { rows: [], rowCount: 1 };
+        return [{ affectedRows: 1 }];
       }
-
-      if (sql.includes("set updated_at = now() where id = $1 and status = 'sending'")) {
-        return { rows: [], rowCount: 1 };
+      if (sql.includes('UPDATE newsletters')) {
+        return [{ affectedRows: 1 }];
       }
-
-      if (sql.includes('set status = $2')) {
-        assert.equal(parameters[1], 'sent');
-        return { rows: [], rowCount: 1 };
-      }
-
       throw new Error(`Unexpected database query: ${sql}`);
+    },
+    async getConnection() {
+      return {
+        async beginTransaction() {},
+        async execute(sql) {
+          if (sql.includes('FOR UPDATE SKIP LOCKED')) {
+            if (claimed) return [[]];
+            claimed = true;
+            return [[{
+              id: 'newsletter-id',
+              title: 'Weekly Market Update',
+              subject: 'This Week in Financial Markets',
+              html_content: '<html><body><h1>Market update</h1></body></html>',
+            }]];
+          }
+          if (sql.includes('GET_LOCK')) return [[{ acquired: 1 }]];
+          if (sql.includes('RELEASE_LOCK')) return [[{ released: 1 }]];
+          if (sql.includes('UPDATE newsletters')) return [{ affectedRows: 1 }];
+          throw new Error(`Unexpected transaction query: ${sql}`);
+        },
+        async commit() {},
+        async rollback() {},
+        release() {},
+      };
     },
   };
   const emailService = {
