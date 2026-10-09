@@ -1,0 +1,26 @@
+{
+  "name": "derivion-newsletter-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test",
+    "db:migrate": "node scripts/migrate.js",
+    "ses:test": "node scripts/ses-check.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-ses": "^3.800.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.1.0",
+    "node-cron": "^4.2.1",
+    "pg": "^8.16.3"
+  }
+}

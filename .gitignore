@@ -1,0 +1,11 @@
+# Local environment files; keep the example template versioned
+.env*
+!.env.example
+
+# Dependencies and generated AWS SAM output
+node_modules/
+.aws-sam/
+
+# Local tooling output
+coverage/
+npm-debug.log*
