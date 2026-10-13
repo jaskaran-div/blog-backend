@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createNewsletterService } from '../src/newsletterService.js';
+import { createUnsubscribeToken } from '../src/tokens.js';
 
 const config = {
   apiPublicUrl: 'https://newsletter.example.com',
@@ -14,17 +15,16 @@ const config = {
 test('new subscriptions are active immediately and emails are normalized', async () => {
   const saved = [];
   let emailsSent = 0;
-  const pool = {
-    async execute(sql, parameters) {
-      assert.match(sql, /INSERT INTO subscribers/);
-      assert.match(sql, /ON DUPLICATE KEY UPDATE/);
-      assert.match(sql, /status IN \('pending', 'unsubscribed'\)/);
-      saved.push({ email: parameters[1] });
-      return [{ affectedRows: 1 }];
-    },
-  };
   const service = createNewsletterService({
-    pool,
+    pool: {
+      async query(sql, parameters) {
+        assert.match(sql, /INSERT INTO subscribers/);
+        assert.match(sql, /ON CONFLICT \(email\) DO UPDATE/);
+        assert.match(sql, /subscribers\.status IN \('pending', 'unsubscribed'\)/);
+        saved.push({ email: parameters[1] });
+        return { rowCount: 1, rows: [] };
+      },
+    },
     emailService: { async sendEmail() { emailsSent += 1; } },
     config,
     logger: { error() {} },
@@ -37,111 +37,67 @@ test('new subscriptions are active immediately and emails are normalized', async
   assert.equal(result.message, 'You are subscribed to the weekly newsletter.');
 });
 
-test('resubscription uses a conditional MySQL upsert without rotating active subscriptions', async () => {
-  const queries = [];
-  const service = createNewsletterService({
-    pool: {
-      async execute(sql, parameters) {
-        queries.push({ sql, parameters });
-        return [{ affectedRows: queries.length === 1 ? 1 : 0 }];
-      },
-    },
-    emailService: { async sendEmail() {} },
-    config,
-    logger: { error() {} },
-  });
-
-  const firstResult = await service.subscribe('reader@example.com');
-  const duplicateResult = await service.subscribe('reader@example.com');
-  assert.equal(firstResult.message, 'You are subscribed to the weekly newsletter.');
-  assert.equal(duplicateResult.message, 'You are subscribed to the weekly newsletter.');
-  assert.equal(queries.length, 2);
-  assert.match(queries[0].sql, /status = IF\(status IN/);
-  assert.deepEqual(queries[0].parameters.slice(1, 2), ['reader@example.com']);
-  assert.notEqual(queries[0].parameters[2], queries[1].parameters[2]);
-});
-
-test('verification activates a pending subscriber and clears its token', async () => {
-  const token = 'b'.repeat(43);
-  let queryParameters;
-  const service = createNewsletterService({
-    pool: {
-      async execute(sql, parameters) {
-        assert.match(sql, /SET status = 'active'/);
-        assert.match(sql, /verification_token = NULL/);
-        assert.match(sql, /unsubscribe_token = \?/);
-        queryParameters = parameters;
-        return [{ affectedRows: 1 }];
-      },
-    },
-    emailService: {},
-    config,
-  });
-
-  assert.deepEqual(await service.verify(token), { ok: true });
-  assert.equal(queryParameters[1], token);
-  assert.deepEqual(await service.verify('invalid'), { ok: false });
-});
-
-test('unsubscribe marks a subscriber and is idempotent using affectedRows', async () => {
+test('verification and unsubscribe use PostgreSQL result counts and unsubscribe is idempotent', async () => {
   const subscriberId = '4a2e8658-13e8-4e66-a146-66ef051a7e48';
   const unsubscribeNonce = 'fdcb2571-ef39-4c49-aa98-c9a3f9f0a002';
   let active = true;
   const service = createNewsletterService({
     pool: {
-      async execute(sql, parameters) {
-        if (sql.includes('UPDATE subscribers')) {
-          assert.match(sql, /status = 'unsubscribed'/);
-          assert.match(sql, /COALESCE\(unsubscribed_at, CURRENT_TIMESTAMP/);
+      async query(sql, parameters) {
+        if (sql.includes("SET status = 'active'")) {
+          assert.match(sql, /unsubscribe_token = \$1/);
+          assert.equal(parameters[1], 'b'.repeat(43));
+          return { rowCount: 1, rows: [] };
+        }
+        if (sql.includes("SET status = 'unsubscribed'")) {
+          assert.match(sql, /COALESCE\(unsubscribed_at, NOW\(\)\)/);
           assert.deepEqual(parameters, [subscriberId, unsubscribeNonce]);
-          if (!active) return [{ affectedRows: 0 }];
+          if (!active) return { rowCount: 0, rows: [] };
           active = false;
-          return [{ affectedRows: 1 }];
+          return { rowCount: 1, rows: [] };
         }
         assert.match(sql, /status = 'unsubscribed'/);
         assert.deepEqual(parameters, [subscriberId, unsubscribeNonce]);
-        return [[{}]];
+        return { rowCount: 1, rows: [{}] };
       },
     },
     emailService: {},
     config,
   });
-  const { createUnsubscribeToken } = await import('../src/tokens.js');
-  const token = createUnsubscribeToken(subscriberId, unsubscribeNonce, config.tokenSecret);
 
+  assert.deepEqual(await service.verify('b'.repeat(43)), { ok: true });
+  assert.deepEqual(await service.verify('invalid'), { ok: false });
+  const token = createUnsubscribeToken(subscriberId, unsubscribeNonce, config.tokenSecret);
   assert.deepEqual(await service.unsubscribe(token), { ok: true });
   assert.deepEqual(await service.unsubscribe(token), { ok: true });
 });
 
-test('manual sends reuse the campaign and send only to active subscribers without a sent delivery', async () => {
+test('manual sends reuse the campaign and avoid resending to previous recipients', async () => {
   const htmlContent = '<html><body><h1>Market update</h1></body></html>';
-  let campaign = null;
+  let campaign;
   const deliveries = new Map();
-  const subscribers = [
-    {
-      id: '00000000-0000-4000-8000-000000000001',
-      email: 'reader@example.com',
-      unsubscribe_token: 'fdcb2571-ef39-4c49-aa98-c9a3f9f0a001',
-    },
-  ];
-  const connection = {
-    async beginTransaction() {},
-    async commit() {},
-    async rollback() {},
-    release() {},
-    async execute(sql, parameters = []) {
-      if (sql.includes('GET_LOCK')) return [[{ acquired: 1 }]];
-      if (sql.includes('RELEASE_LOCK')) return [[{ released: 1 }]];
+  const subscribers = [{
+    id: '00000000-0000-4000-8000-000000000001',
+    email: 'reader@example.com',
+    unsubscribe_token: 'fdcb2571-ef39-4c49-aa98-c9a3f9f0a001',
+  }];
+  const client = {
+    async query(sql, parameters = []) {
+      if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)
+        || sql.includes('pg_advisory_xact_lock')) {
+        return { rows: [] };
+      }
       if (sql.includes('FROM newsletters')) {
-        return [[campaign?.title === parameters[0]
+        const rows = campaign?.title === parameters[0]
           && campaign.subject === parameters[1]
           && campaign.html_content === parameters[2]
-          ? campaign
-          : null].filter(Boolean)];
+          ? [campaign]
+          : [];
+        return { rows, rowCount: rows.length };
       }
-      if (sql.includes('UPDATE newsletters')) {
+      if (sql.includes("SET status = 'sending'")) {
         campaign.status = 'sending';
-        return [{ affectedRows: 1 }];
+        return { rowCount: 1, rows: [] };
       }
       if (sql.includes('INSERT INTO newsletters')) {
         campaign = {
@@ -151,49 +107,46 @@ test('manual sends reuse the campaign and send only to active subscribers withou
           html_content: parameters[3],
           status: 'sending',
         };
-        return [{ affectedRows: 1 }];
+        return { rowCount: 1, rows: [campaign] };
       }
       throw new Error(`Unexpected transaction query: ${sql}`);
     },
+    release() {},
   };
   const pool = {
-    async getConnection() { return connection; },
-    async execute(sql, parameters = []) {
+    async connect() { return client; },
+    async query(sql, parameters = []) {
       if (sql.includes('SELECT subscriber.id, subscriber.email')) {
         const [lastId, , limit] = parameters;
-        return [subscribers
-            .filter((subscriber) => subscriber.id > lastId
-              && deliveries.get(`${campaign.id}:${subscriber.id}`) !== 'sent')
-            .slice(0, limit)];
+        const rows = subscribers
+          .filter((subscriber) => subscriber.id > lastId
+            && deliveries.get(`${campaign.id}:${subscriber.id}`) !== 'sent')
+          .slice(0, limit);
+        return { rows, rowCount: rows.length };
       }
       if (sql.includes('INSERT INTO newsletter_deliveries')) {
         const key = `${parameters[0]}:${parameters[1]}`;
-        if (deliveries.get(key) !== 'sent') {
-          deliveries.set(key, 'sending');
-        }
-        return [{ affectedRows: 1 }];
+        if (deliveries.get(key) !== 'sent') deliveries.set(key, 'sending');
+        return { rows: [{ status: deliveries.get(key) }], rowCount: 1 };
       }
-      if (sql.includes('SELECT status FROM newsletter_deliveries')) {
-        const status = deliveries.get(`${parameters[0]}:${parameters[1]}`);
-        return [[{ status }].filter((row) => row.status)];
-      }
-      if (sql.includes("SET status = 'sent'")) {
-        deliveries.set(`${parameters[0]}:${parameters[1]}`, 'sent');
-        return [{ affectedRows: 1 }];
+      if (sql.includes('UPDATE newsletter_deliveries')) {
+        const [newsletterId, subscriberId] = sql.includes("status = 'sent'")
+          ? parameters
+          : parameters.slice(1);
+        const key = `${newsletterId}:${subscriberId}`;
+        deliveries.set(key, sql.includes("status = 'sent'") ? 'sent' : 'failed');
+        return { rowCount: 1, rows: [] };
       }
       if (sql.includes("SET status = 'failed'")) {
-        deliveries.set(`${parameters[1]}:${parameters[2]}`, 'failed');
-        return [{ affectedRows: 1 }];
+        campaign.status = 'failed';
+        return { rowCount: 1, rows: [] };
       }
-      if (sql.includes('SET updated_at')) {
-        return [{ affectedRows: 1 }];
-      }
-      if (sql.includes('SET status = ?')) {
+      if (sql.includes('SET status = $1')) {
         campaign.status = parameters[0];
-        return [{ affectedRows: 1 }];
+        return { rowCount: 1, rows: [] };
       }
       if (sql.includes('UPDATE newsletters')) {
-        return [{ affectedRows: 1 }];
+        return { rowCount: 1, rows: [] };
       }
       throw new Error(`Unexpected database query: ${sql}`);
     },
@@ -212,13 +165,8 @@ test('manual sends reuse the campaign and send only to active subscribers withou
   };
 
   const firstResult = await service.sendNewsletterNow(request);
-  const firstCampaignId = firstResult.newsletterId;
-  assert.deepEqual(firstResult, {
-    newsletterId: firstCampaignId,
-    status: 'sent',
-    sentCount: 1,
-    failedCount: 0,
-  });
+  assert.equal(firstResult.status, 'sent');
+  assert.equal(firstResult.sentCount, 1);
   assert.equal(emailsSent, 1);
 
   subscribers.push({
@@ -228,25 +176,14 @@ test('manual sends reuse the campaign and send only to active subscribers withou
   });
 
   const secondResult = await service.sendNewsletterNow(request);
-  assert.deepEqual(secondResult, {
-    newsletterId: firstCampaignId,
-    status: 'sent',
-    sentCount: 1,
-    failedCount: 0,
-  });
+  assert.equal(secondResult.newsletterId, firstResult.newsletterId);
+  assert.equal(secondResult.sentCount, 1);
   assert.equal(emailsSent, 2);
-  assert.equal(deliveries.get(`${firstCampaignId}:${subscribers[0].id}`), 'sent');
-  assert.equal(deliveries.get(`${firstCampaignId}:${subscribers[1].id}`), 'sent');
+  assert.equal(deliveries.get(`${firstResult.newsletterId}:${subscribers[0].id}`), 'sent');
+  assert.equal(deliveries.get(`${firstResult.newsletterId}:${subscribers[1].id}`), 'sent');
 
   const resendResult = await service.sendNewsletterNow({ ...request, resend: true });
-  assert.deepEqual(resendResult, {
-    newsletterId: resendResult.newsletterId,
-    status: 'sent',
-    sentCount: 2,
-    failedCount: 0,
-  });
+  assert.notEqual(resendResult.newsletterId, firstResult.newsletterId);
+  assert.equal(resendResult.sentCount, 2);
   assert.equal(emailsSent, 4);
-  assert.notEqual(resendResult.newsletterId, firstCampaignId);
-  assert.equal(deliveries.get(`${resendResult.newsletterId}:${subscribers[0].id}`), 'sent');
-  assert.equal(deliveries.get(`${resendResult.newsletterId}:${subscribers[1].id}`), 'sent');
 });

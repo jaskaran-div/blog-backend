@@ -1,22 +1,14 @@
 CREATE TABLE IF NOT EXISTS subscribers (
-  id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-  email VARCHAR(254) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
-  status VARCHAR(16) NOT NULL DEFAULT 'pending',
-  verification_token VARCHAR(128) NULL,
-  unsubscribe_token CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL,
-  verified_at DATETIME(3) NULL,
-  subscribed_at DATETIME(3) NULL,
-  unsubscribed_at DATETIME(3) NULL,
-  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (id),
-  UNIQUE KEY subscribers_email_unique (email),
-  UNIQUE KEY subscribers_verification_token_unique (verification_token),
-  UNIQUE KEY subscribers_unsubscribe_token_unique (unsubscribe_token),
-  KEY subscribers_active_id_idx (status, id),
-  CONSTRAINT subscribers_status_check
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email VARCHAR(254) NOT NULL UNIQUE CHECK (email = LOWER(email)),
+  status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'active', 'unsubscribed')),
-  CONSTRAINT subscribers_email_lowercase_check
-    CHECK (email = LOWER(email)),
+  verification_token TEXT UNIQUE,
+  unsubscribe_token UUID UNIQUE,
+  verified_at TIMESTAMPTZ,
+  subscribed_at TIMESTAMPTZ,
+  unsubscribed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT subscribers_verification_state_check CHECK (
     (status = 'pending' AND verification_token IS NOT NULL AND unsubscribe_token IS NULL
       AND verified_at IS NULL AND subscribed_at IS NULL AND unsubscribed_at IS NULL)
@@ -25,47 +17,52 @@ CREATE TABLE IF NOT EXISTS subscribers (
     OR (status = 'unsubscribed' AND verification_token IS NULL AND unsubscribe_token IS NOT NULL
       AND unsubscribed_at IS NOT NULL)
   )
-) ENGINE=InnoDB;
+);
+
+CREATE INDEX IF NOT EXISTS subscribers_active_id_idx
+  ON subscribers (id) WHERE status = 'active';
 
 CREATE TABLE IF NOT EXISTS newsletters (
-  id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-  title VARCHAR(300) NOT NULL,
-  subject VARCHAR(998) NOT NULL,
-  html_content LONGTEXT NOT NULL,
-  send_at DATETIME(3) NOT NULL,
-  status VARCHAR(16) NOT NULL DEFAULT 'draft',
-  sent_at DATETIME(3) NULL,
-  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
-    ON UPDATE CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (id),
-  KEY newsletters_due_idx (status, send_at, id),
-  CONSTRAINT newsletters_status_check
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  title TEXT NOT NULL CHECK (LENGTH(TRIM(title)) BETWEEN 1 AND 300),
+  subject TEXT NOT NULL CHECK (LENGTH(TRIM(subject)) BETWEEN 1 AND 998),
+  html_content TEXT NOT NULL CHECK (
+    LENGTH(TRIM(html_content)) > 0 AND LENGTH(html_content) <= 450000
+  ),
+  send_at TIMESTAMPTZ NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft'
     CHECK (status IN ('draft', 'scheduled', 'sending', 'sent', 'failed')),
-  CONSTRAINT newsletters_title_check
-    CHECK (CHAR_LENGTH(TRIM(title)) BETWEEN 1 AND 300),
-  CONSTRAINT newsletters_subject_check
-    CHECK (CHAR_LENGTH(TRIM(subject)) BETWEEN 1 AND 998),
-  CONSTRAINT newsletters_html_content_check
-    CHECK (CHAR_LENGTH(TRIM(html_content)) > 0 AND CHAR_LENGTH(html_content) <= 450000)
-) ENGINE=InnoDB;
+  sent_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS newsletters_due_idx
+  ON newsletters (send_at, id) WHERE status IN ('scheduled', 'sending');
+
+CREATE OR REPLACE FUNCTION set_newsletters_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS newsletters_updated_at_trigger ON newsletters;
+CREATE TRIGGER newsletters_updated_at_trigger
+  BEFORE UPDATE ON newsletters
+  FOR EACH ROW EXECUTE FUNCTION set_newsletters_updated_at();
 
 CREATE TABLE IF NOT EXISTS newsletter_deliveries (
-  newsletter_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-  subscriber_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-  status VARCHAR(16) NOT NULL,
-  attempts INT NOT NULL DEFAULT 0,
-  sent_at DATETIME(3) NULL,
-  last_error VARCHAR(1000) NULL,
-  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
-    ON UPDATE CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (newsletter_id, subscriber_id),
-  KEY newsletter_deliveries_status_idx (newsletter_id, status),
-  CONSTRAINT newsletter_deliveries_newsletter_fk
-    FOREIGN KEY (newsletter_id) REFERENCES newsletters (id) ON DELETE CASCADE,
-  CONSTRAINT newsletter_deliveries_subscriber_fk
-    FOREIGN KEY (subscriber_id) REFERENCES subscribers (id) ON DELETE CASCADE,
-  CONSTRAINT newsletter_deliveries_status_check
-    CHECK (status IN ('sending', 'sent', 'failed')),
-  CONSTRAINT newsletter_deliveries_attempts_check CHECK (attempts >= 0)
-) ENGINE=InnoDB;
+  newsletter_id UUID NOT NULL REFERENCES newsletters (id) ON DELETE CASCADE,
+  subscriber_id UUID NOT NULL REFERENCES subscribers (id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK (status IN ('sending', 'sent', 'failed')),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  sent_at TIMESTAMPTZ,
+  last_error TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (newsletter_id, subscriber_id)
+);
+
+CREATE INDEX IF NOT EXISTS newsletter_deliveries_status_idx
+  ON newsletter_deliveries (newsletter_id, status);

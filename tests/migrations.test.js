@@ -2,17 +2,18 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { migrateDatabase } from '../src/migrations.js';
 
-test('migration applies all MySQL newsletter tables without PostgreSQL statements', async () => {
-  const statements = [];
+test('migration applies the PostgreSQL newsletter schema', async () => {
+  let schema;
   await migrateDatabase({
     async query(statement) {
-      statements.push(statement);
+      schema = statement;
     },
   });
 
-  assert.equal(statements.length, 3);
-  assert.match(statements[0], /CREATE TABLE IF NOT EXISTS subscribers/);
-  assert.match(statements[1], /CREATE TABLE IF NOT EXISTS newsletters/);
-  assert.match(statements[2], /CREATE TABLE IF NOT EXISTS newsletter_deliveries/);
-  assert.ok(statements.every((statement) => !/public\.|timestamptz|gen_random_uuid/.test(statement)));
+  assert.match(schema, /CREATE TABLE IF NOT EXISTS subscribers/);
+  assert.match(schema, /CREATE TABLE IF NOT EXISTS newsletters/);
+  assert.match(schema, /CREATE TABLE IF NOT EXISTS newsletter_deliveries/);
+  assert.match(schema, /TIMESTAMPTZ/);
+  assert.match(schema, /gen_random_uuid/);
+  assert.doesNotMatch(schema, /ENGINE=InnoDB|AUTO_INCREMENT/);
 });

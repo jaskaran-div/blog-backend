@@ -251,62 +251,60 @@ test('scheduled campaigns send only the active recipients in bounded batches', a
   let maxSimultaneous = 0;
 
   const pool = {
-    async execute(sql, parameters = []) {
+    async query(sql, parameters = []) {
       if (sql.includes('SELECT subscriber.id, subscriber.email')) {
         assert.match(sql, /subscriber\.status = 'active'/);
         const [lastId, , limit] = parameters;
         const rows = subscribers
-          .filter((subscriber) => subscriber.id > lastId && deliveries.get(subscriber.id) !== 'sent')
+          .filter((subscriber) => subscriber.id > lastId
+            && deliveries.get(`newsletter-id:${subscriber.id}`) !== 'sent')
           .slice(0, limit);
-        return [rows];
+        return { rows, rowCount: rows.length };
       }
       if (sql.includes('INSERT INTO newsletter_deliveries')) {
-        const [, subscriberId] = parameters;
-        if (deliveries.get(subscriberId) !== 'sent') {
-          deliveries.set(subscriberId, 'sending');
+        const [newsletterId, subscriberId] = parameters;
+        const key = `${newsletterId}:${subscriberId}`;
+        if (deliveries.get(key) !== 'sent') {
+          deliveries.set(key, 'sending');
         }
-        return [{ affectedRows: 1 }];
+        return { rows: [{ status: deliveries.get(key) }], rowCount: 1 };
       }
-      if (sql.includes('SELECT status FROM newsletter_deliveries')) {
-        const [, subscriberId] = parameters;
-        return [[{ status: deliveries.get(subscriberId) }]];
-      }
-      if (sql.includes("SET status = 'sent'")) {
-        const [, subscriberId] = parameters;
-        deliveries.set(subscriberId, 'sent');
-        return [{ affectedRows: 1 }];
-      }
-      if (sql.includes("SET status = 'failed'")) {
-        const [, subscriberId] = parameters;
-        deliveries.set(subscriberId, 'failed');
-        return [{ affectedRows: 1 }];
+      if (sql.includes('UPDATE newsletter_deliveries')) {
+        const [newsletterId, subscriberId] = sql.includes("status = 'sent'")
+          ? parameters
+          : parameters.slice(1);
+        deliveries.set(
+          `${newsletterId}:${subscriberId}`,
+          sql.includes("status = 'sent'") ? 'sent' : 'failed',
+        );
+        return { rowCount: 1, rows: [] };
       }
       if (sql.includes('UPDATE newsletters')) {
-        return [{ affectedRows: 1 }];
+        return { rowCount: 1, rows: [] };
       }
       throw new Error(`Unexpected database query: ${sql}`);
     },
-    async getConnection() {
+    async connect() {
       return {
-        async beginTransaction() {},
-        async execute(sql) {
+        async query(sql) {
+          if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+            return { rows: [] };
+          }
           if (sql.includes('FOR UPDATE SKIP LOCKED')) {
-            if (claimed) return [[]];
+            if (claimed) return { rows: [] };
             claimed = true;
-            return [[{
+            return { rows: [{
               id: 'newsletter-id',
               title: 'Weekly Market Update',
               subject: 'This Week in Financial Markets',
               html_content: '<html><body><h1>Market update</h1></body></html>',
-            }]];
+            }] };
           }
-          if (sql.includes('GET_LOCK')) return [[{ acquired: 1 }]];
-          if (sql.includes('RELEASE_LOCK')) return [[{ released: 1 }]];
-          if (sql.includes('UPDATE newsletters')) return [{ affectedRows: 1 }];
+          if (sql.includes('pg_try_advisory_lock')) return { rows: [{ acquired: true }] };
+          if (sql.includes('pg_advisory_unlock')) return { rows: [{ released: true }] };
+          if (sql.includes('UPDATE newsletters')) return { rowCount: 1, rows: [] };
           throw new Error(`Unexpected transaction query: ${sql}`);
         },
-        async commit() {},
-        async rollback() {},
         release() {},
       };
     },

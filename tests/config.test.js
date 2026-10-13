@@ -3,11 +3,7 @@ import test from 'node:test';
 import { loadConfig } from '../src/config.js';
 
 const env = {
-  DB_HOST: 'mysql.example.test',
-  DB_PORT: '3306',
-  DB_NAME: 'newsletter_test',
-  DB_USER: 'newsletter_user',
-  DB_PASSWORD: 'test-password',
+  DATABASE_URL: 'postgresql://newsletter_user:test-password@ep-example.neon.tech/newsletter_test?sslmode=require',
   SES_FROM_EMAIL: 'newsletter@example.com',
   NEWSLETTER_TOKEN_SECRET: 'token-secret-with-at-least-thirty-two-bytes',
   NEWSLETTER_ADMIN_TOKEN: 'admin-secret-with-at-least-thirty-two-bytes',
@@ -16,43 +12,33 @@ const env = {
   ALLOWED_ORIGINS: 'https://site.example.com,http://localhost:3000',
 };
 
-test('loads MySQL settings, AWS defaults and allowed origins', () => {
+test('loads Neon PostgreSQL settings, AWS defaults and allowed origins', () => {
   const config = loadConfig(env);
 
+  assert.equal(config.databaseUrl, env.DATABASE_URL);
   assert.equal(config.awsRegion, 'ap-southeast-2');
   assert.equal(config.sesFromName, 'ISFT');
   assert.equal(config.port, 4000);
   assert.equal(config.batchSize, 50);
   assert.equal(config.sendConcurrency, 5);
-  assert.equal(config.databaseHost, 'mysql.example.test');
-  assert.equal(config.databasePort, 3306);
-  assert.equal(config.databaseName, 'newsletter_test');
-  assert.equal(config.databaseUser, 'newsletter_user');
-  assert.equal(config.databasePassword, 'test-password');
   assert.deepEqual(config.allowedOrigins, [
     'https://site.example.com',
     'http://localhost:3000',
   ]);
 });
 
-test('requires GoDaddy MySQL settings and validates the port', () => {
-  for (const name of ['DB_HOST', 'DB_NAME', 'DB_USER']) {
-    assert.throws(
-      () => loadConfig({ ...env, [name]: '' }),
-      new RegExp(`Missing required environment variable: ${name}`),
-    );
-  }
+test('requires a valid PostgreSQL connection URL', () => {
   assert.throws(
-    () => loadConfig({ ...env, DB_PORT: '65536' }),
-    /DB_PORT must be between 1 and 65535/,
+    () => loadConfig({ ...env, DATABASE_URL: '' }),
+    /Missing required environment variable: DATABASE_URL/,
   );
   assert.throws(
-    () => loadConfig({ ...env, DB_PASSWORD: '' }),
-    /Missing required environment variable: DB_PASSWORD/,
+    () => loadConfig({ ...env, DATABASE_URL: 'https://example.com/db' }),
+    /DATABASE_URL must be a valid PostgreSQL connection URL/,
   );
   assert.throws(
-    () => loadConfig(Object.fromEntries(Object.entries(env).filter(([name]) => name !== 'DB_HOST'))),
-    /Missing required environment variable: DB_HOST/,
+    () => loadConfig({ ...env, DATABASE_URL: 'postgresql://host' }),
+    /DATABASE_URL must include a PostgreSQL protocol, host, username, and database name/,
   );
 });
 

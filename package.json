@@ -12,6 +12,7 @@
     "test": "node --test",
     "db:migrate": "node scripts/migrate.js",
     "newsletter:send": "node scripts/send-newsletter.js",
+    "newsletter:preview": "node scripts/send-newsletter-preview.js",
     "ses:test": "node scripts/ses-check.js"
   },
   "dependencies": {
@@ -22,6 +23,6 @@
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.1.0",
     "node-cron": "^4.2.1",
-    "mysql2": "^3.15.3"
+    "pg": "^8.23.1"
   }
 }

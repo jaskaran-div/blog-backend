@@ -19,21 +19,20 @@ try {
     new URL('../../frontend/public/Newsletter/isft-weekly-newsletter.html', import.meta.url),
     'utf8',
   );
-  const [rows] = await pool.execute(
+  const { rows } = await pool.query(
     `SELECT
-       COUNT(CASE WHEN subscriber.status = 'active' THEN 1 END) AS active_count,
-       COUNT(CASE
-         WHEN subscriber.status = 'active'
+       COUNT(*) FILTER (WHERE subscriber.status = 'active')::INTEGER AS active_count,
+       COUNT(*) FILTER (
+         WHERE subscriber.status = 'active'
            AND NOT EXISTS (
              SELECT 1
              FROM newsletter_deliveries AS delivery
              JOIN newsletters AS newsletter ON newsletter.id = delivery.newsletter_id
-             WHERE newsletter.html_content = ?
+             WHERE newsletter.html_content = $1
                AND delivery.subscriber_id = subscriber.id
                AND delivery.status = 'sent'
            )
-         THEN 1
-       END) AS eligible_count
+       )::INTEGER AS eligible_count
      FROM subscribers AS subscriber`,
     [htmlContent],
   );

@@ -103,25 +103,22 @@ export function loadConfig(env = process.env) {
 }
 
 export function loadDatabaseConfig(env = process.env) {
-  const databaseHost = required(env, 'DB_HOST');
-  const databasePort = positiveInteger(env, 'DB_PORT', 3306);
-  if (databasePort > 65535) {
-    throw new Error('DB_PORT must be between 1 and 65535.');
+  const databaseUrl = required(env, 'DATABASE_URL');
+  let parsed;
+  try {
+    parsed = new URL(databaseUrl);
+  } catch {
+    throw new Error('DATABASE_URL must be a valid PostgreSQL connection URL.');
   }
-  const databaseUser = required(env, 'DB_USER');
-  const databaseName = required(env, 'DB_NAME');
-  const databasePassword = env.DB_PASSWORD;
-  if (typeof databasePassword !== 'string' || databasePassword.length === 0) {
-    throw new Error('Missing required environment variable: DB_PASSWORD');
+  if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) {
+    throw new Error('DATABASE_URL must be a valid PostgreSQL connection URL.');
   }
-
-  return {
-    databaseHost,
-    databasePort,
-    databaseUser,
-    databasePassword,
-    databaseName,
-  };
+  if (!parsed.hostname
+    || !parsed.username
+    || !parsed.pathname || parsed.pathname === '/') {
+    throw new Error('DATABASE_URL must include a PostgreSQL protocol, host, username, and database name.');
+  }
+  return { databaseUrl };
 }
 
 export function loadEmailConfig(env = process.env) {
