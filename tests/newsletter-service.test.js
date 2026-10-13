@@ -83,12 +83,17 @@ test('verification activates a pending subscriber and clears its token', async (
   assert.deepEqual(await service.verify('invalid'), { ok: false });
 });
 
+<<<<<<< HEAD
 test('unsubscribe marks a subscriber and is idempotent using affectedRows', async () => {
+=======
+test('unsubscribe deletes a subscriber and is idempotent', async () => {
+>>>>>>> e7eef70 (database to neon)
   const subscriberId = '4a2e8658-13e8-4e66-a146-66ef051a7e48';
   const unsubscribeNonce = 'fdcb2571-ef39-4c49-aa98-c9a3f9f0a002';
-  let updateCount = 0;
+  let subscriberExists = true;
   const service = createNewsletterService({
     pool: {
+<<<<<<< HEAD
       async execute(sql, parameters) {
         if (sql.includes('UPDATE subscribers')) {
           assert.match(sql, /status = 'unsubscribed'/);
@@ -100,6 +105,19 @@ test('unsubscribe marks a subscriber and is idempotent using affectedRows', asyn
         assert.match(sql, /status = 'unsubscribed'/);
         assert.deepEqual(parameters, [subscriberId, unsubscribeNonce]);
         return [[{}]];
+=======
+      async query(sql, parameters) {
+        if (sql.includes('delete from public.subscribers')) {
+          assert.match(sql, /returning id/);
+          assert.deepEqual(parameters, [subscriberId, unsubscribeNonce]);
+          if (!subscriberExists) return { rowCount: 0 };
+          subscriberExists = false;
+          return { rowCount: 1 };
+        }
+        assert.match(sql, /select 1 from public\.subscribers where id = \$1/);
+        assert.deepEqual(parameters, [subscriberId]);
+        return { rowCount: subscriberExists ? 1 : 0 };
+>>>>>>> e7eef70 (database to neon)
       },
     },
     emailService: {},
@@ -110,4 +128,130 @@ test('unsubscribe marks a subscriber and is idempotent using affectedRows', asyn
 
   assert.deepEqual(await service.unsubscribe(token), { ok: true });
   assert.deepEqual(await service.unsubscribe(token), { ok: true });
+});
+
+test('manual sends reuse the campaign and send only to active subscribers without a sent delivery', async () => {
+  const htmlContent = '<html><body><h1>Market update</h1></body></html>';
+  let campaign = null;
+  let campaignNumber = 0;
+  const deliveries = new Map();
+  const subscribers = [
+    {
+      id: '00000000-0000-4000-8000-000000000001',
+      email: 'reader@example.com',
+      unsubscribe_token: 'fdcb2571-ef39-4c49-aa98-c9a3f9f0a001',
+    },
+  ];
+  const client = {
+    async query(sql, parameters = []) {
+      if (sql === 'begin' || sql === 'commit' || sql === 'rollback') {
+        return { rows: [] };
+      }
+      if (sql.includes('pg_advisory_xact_lock')) {
+        return { rows: [] };
+      }
+      if (sql.includes('from public.newsletters')) {
+        return {
+          rows: campaign?.title === parameters[0]
+            && campaign.subject === parameters[1]
+            && campaign.html_content === parameters[2]
+            ? [campaign]
+            : [],
+        };
+      }
+      if (sql.includes('set status = \'sending\'')) {
+        campaign.status = 'sending';
+        return { rows: [campaign] };
+      }
+      if (sql.includes('insert into public.newsletters')) {
+        campaignNumber += 1;
+        campaign = {
+          id: `newsletter-id-${campaignNumber}`,
+          title: parameters[0],
+          subject: parameters[1],
+          html_content: parameters[2],
+          status: 'sending',
+        };
+        return { rows: [campaign] };
+      }
+      throw new Error(`Unexpected transaction query: ${sql}`);
+    },
+    release() {},
+  };
+  const pool = {
+    connect: async () => client,
+    async query(sql, parameters = []) {
+      if (sql.includes('select subscriber.id, subscriber.email')) {
+        const [, lastId, limit] = parameters;
+        return {
+          rows: subscribers
+            .filter((subscriber) => subscriber.id > lastId
+              && deliveries.get(`${campaign.id}:${subscriber.id}`) !== 'sent')
+            .slice(0, limit),
+        };
+      }
+      if (sql.includes('insert into public.newsletter_deliveries')) {
+        deliveries.set(`${parameters[0]}:${parameters[1]}`, 'sending');
+        return { rows: [{ status: 'sending' }] };
+      }
+      if (sql.includes("set status = 'sent'")) {
+        deliveries.set(`${parameters[0]}:${parameters[1]}`, 'sent');
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes('set updated_at = now() where id = $1 and status =')) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes('set status = $2')) {
+        campaign.status = parameters[1];
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error(`Unexpected database query: ${sql}`);
+    },
+  };
+  let emailsSent = 0;
+  const service = createNewsletterService({
+    pool,
+    emailService: { async sendEmail() { emailsSent += 1; } },
+    config,
+    logger: { info() {}, error() {} },
+  });
+  const request = {
+    title: 'Weekly Market Update',
+    subject: 'This Week in Financial Markets',
+    htmlContent,
+  };
+
+  assert.deepEqual(await service.sendNewsletterNow(request), {
+    newsletterId: 'newsletter-id-1',
+    status: 'sent',
+    sentCount: 1,
+    failedCount: 0,
+  });
+  assert.equal(emailsSent, 1);
+
+  subscribers.push({
+    id: '00000000-0000-4000-8000-000000000002',
+    email: 'new-reader@example.com',
+    unsubscribe_token: 'fdcb2571-ef39-4c49-aa98-c9a3f9f0a002',
+  });
+
+  assert.deepEqual(await service.sendNewsletterNow(request), {
+    newsletterId: 'newsletter-id-1',
+    status: 'sent',
+    sentCount: 1,
+    failedCount: 0,
+  });
+  assert.equal(emailsSent, 2);
+  assert.equal(deliveries.get(`newsletter-id-1:${subscribers[0].id}`), 'sent');
+  assert.equal(deliveries.get(`newsletter-id-1:${subscribers[1].id}`), 'sent');
+
+  assert.deepEqual(await service.sendNewsletterNow({ ...request, resend: true }), {
+    newsletterId: 'newsletter-id-2',
+    status: 'sent',
+    sentCount: 2,
+    failedCount: 0,
+  });
+  assert.equal(emailsSent, 4);
+  assert.equal(deliveries.get(`newsletter-id-2:${subscribers[0].id}`), 'sent');
+  assert.equal(deliveries.get(`newsletter-id-2:${subscribers[1].id}`), 'sent');
 });

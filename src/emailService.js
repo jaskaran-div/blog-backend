@@ -33,7 +33,7 @@ export function createEmailService(config, client = new SESClient({
 })) {
   async function sendEmail({ to, subject, html, text }) {
     const command = new SendEmailCommand({
-      Source: config.sesFromEmail,
+      Source: `${JSON.stringify(config.sesFromName || 'ISFT')} <${config.sesFromEmail}>`,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject, Charset: 'UTF-8' },

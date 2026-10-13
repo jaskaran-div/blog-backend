@@ -33,7 +33,7 @@ function htmlPage(title, message) {
 }
 
 function appendUnsubscribeLink(html, token, siteUrl) {
-  const url = `${siteUrl}/api/newsletter/unsubscribe/${encodeURIComponent(token)}`;
+  const url = `${siteUrl}/newsletter/unsubscribe?token=${encodeURIComponent(token)}`;
   const footer = `<hr style="border:0;border-top:1px solid #e2e8f0;margin:32px 0 16px"><p style="font:12px Arial,sans-serif;color:#64748b">You are receiving this email because you subscribed to the DerivionAcademy newsletter. <a href="${url}" style="color:#1d4ed8">Unsubscribe</a></p>`;
   return /<\/body\s*>/i.test(html)
     ? html.replace(/<\/body\s*>/i, `${footer}</body>`)
@@ -91,12 +91,19 @@ export function createNewsletterService({ pool, emailService, config, logger = c
       return { ok: false };
     }
 
+<<<<<<< HEAD
     const [result] = await pool.execute(
       `UPDATE subscribers
        SET status = 'unsubscribed',
            unsubscribed_at = COALESCE(unsubscribed_at, CURRENT_TIMESTAMP(3)),
            verification_token = NULL
        WHERE id = ? AND unsubscribe_token = ? AND status = 'active'`,
+=======
+    const { rowCount } = await pool.query(
+      `delete from public.subscribers
+       where id = $1 and unsubscribe_token = $2
+       returning id`,
+>>>>>>> e7eef70 (database to neon)
       [tokenClaims.subscriberId, tokenClaims.unsubscribeToken],
     );
 
@@ -104,12 +111,20 @@ export function createNewsletterService({ pool, emailService, config, logger = c
       return { ok: true };
     }
 
+<<<<<<< HEAD
     const [existing] = await pool.execute(
       `SELECT 1 FROM subscribers
        WHERE id = ? AND unsubscribe_token = ? AND status = 'unsubscribed'`,
       [tokenClaims.subscriberId, tokenClaims.unsubscribeToken],
     );
     return { ok: existing.length === 1 };
+=======
+    const existingSubscriber = await pool.query(
+      'select 1 from public.subscribers where id = $1',
+      [tokenClaims.subscriberId],
+    );
+    return { ok: existingSubscriber.rowCount === 0 };
+>>>>>>> e7eef70 (database to neon)
   }
 
   async function sendTestEmail({ to, subject, htmlContent }) {
@@ -237,6 +252,87 @@ export function createNewsletterService({ pool, emailService, config, logger = c
       throw error;
     }
     claim.connection.release();
+  }
+
+  async function sendNewsletterNow({ title, subject, htmlContent, resend = false }) {
+    if (typeof title !== 'string' || !title.trim() || title.length > MAX_TITLE_LENGTH) {
+      throw new Error(`Title must be between 1 and ${MAX_TITLE_LENGTH} characters.`);
+    }
+    if (typeof subject !== 'string' || !subject.trim() || subject.length > MAX_SUBJECT_LENGTH) {
+      throw new Error(`Subject must be between 1 and ${MAX_SUBJECT_LENGTH} characters.`);
+    }
+    if (!isValidHtml(htmlContent)) {
+      throw new Error('Provide newsletter HTML no larger than 450 KB.');
+    }
+
+    const client = await pool.connect();
+    let newsletter;
+    try {
+      await client.query('begin');
+      await client.query(
+        'select pg_advisory_xact_lock(hashtext($1))',
+        [`newsletter:${title}:${subject}`],
+      );
+      const existing = resend
+        ? { rows: [] }
+        : await client.query(
+          `select id, title, subject, html_content, status
+           from public.newsletters
+           where title = $1 and subject = $2 and html_content = $3
+           order by created_at desc
+           limit 1
+           for update`,
+          [title, subject, htmlContent],
+        );
+
+      if (existing.rows[0]) {
+        const campaign = existing.rows[0];
+        if (campaign.status === 'sending') {
+          throw new Error(`This newsletter campaign is already ${campaign.status}.`);
+        }
+        if (!['draft', 'scheduled', 'failed', 'sent'].includes(campaign.status)) {
+          throw new Error(`Cannot send a newsletter campaign with status "${campaign.status}".`);
+        }
+        const updated = await client.query(
+          `update public.newsletters
+           set status = 'sending', send_at = now(), sent_at = null, updated_at = now()
+           where id = $1 and status = $2
+           returning id, title, subject, html_content`,
+          [campaign.id, campaign.status],
+        );
+        if (!updated.rows[0]) {
+          throw new Error('The newsletter campaign changed before it could be sent.');
+        }
+        newsletter = updated.rows[0];
+      } else {
+        const inserted = await client.query(
+          `insert into public.newsletters
+             (title, subject, html_content, send_at, status)
+           values ($1, $2, $3, now(), 'sending')
+           returning id, title, subject, html_content`,
+          [title, subject, htmlContent],
+        );
+        newsletter = inserted.rows[0];
+      }
+      await client.query('commit');
+    } catch (error) {
+      await client.query('rollback');
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    try {
+      return { newsletterId: newsletter.id, ...(await sendNewsletter(newsletter)) };
+    } catch (error) {
+      await pool.query(
+        `update public.newsletters
+         set status = 'failed', sent_at = null, updated_at = now()
+         where id = $1 and status = 'sending'`,
+        [newsletter.id],
+      );
+      throw error;
+    }
   }
 
   async function sendOneRecipient(newsletter, subscriber) {
@@ -398,6 +494,7 @@ export function createNewsletterService({ pool, emailService, config, logger = c
     verify,
     unsubscribe,
     sendTestEmail,
+    sendNewsletterNow,
     processDueNewsletters,
   };
 }

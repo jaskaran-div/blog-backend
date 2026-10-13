@@ -11,6 +11,7 @@
     "dev": "node --watch src/server.js",
     "test": "node --test",
     "db:migrate": "node scripts/migrate.js",
+    "newsletter:send": "node scripts/send-newsletter.js",
     "ses:test": "node scripts/ses-check.js"
   },
   "dependencies": {

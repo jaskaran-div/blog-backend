@@ -139,6 +139,10 @@ export function loadEmailConfig(env = process.env) {
   if (!EMAIL_PATTERN.test(sesFromEmail)) {
     throw new Error('SES_FROM_EMAIL must be a valid email address.');
   }
+  const sesFromName = env.SES_FROM_NAME?.trim() || 'ISFT';
+  if (/[\r\n<>]/.test(sesFromName)) {
+    throw new Error('SES_FROM_NAME must not contain line breaks or angle brackets.');
+  }
 
   return {
     awsRegion: env.AWS_REGION?.trim() || 'ap-southeast-2',
@@ -146,6 +150,7 @@ export function loadEmailConfig(env = process.env) {
     awsSecretAccessKey,
     awsSessionToken,
     sesFromEmail,
+    sesFromName,
     sesConfigurationSet: env.SES_CONFIGURATION_SET?.trim() || undefined,
   };
 }

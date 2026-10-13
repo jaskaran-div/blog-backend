@@ -42,13 +42,28 @@ export function createNewsletterRouter({ newsletterService, emailService, config
         : htmlPage('Verification link invalid', 'This verification link is invalid or has already been used.'));
   }));
 
-  router.get('/unsubscribe/:token', asyncRoute(async (request, response) => {
+  router.get('/unsubscribe/:token', (request, response) => {
+    response.redirect(
+      303,
+      `${config.siteUrl}/newsletter/unsubscribe?token=${encodeURIComponent(request.params.token)}`,
+    );
+  });
+
+  router.post('/unsubscribe/:token', asyncRoute(async (request, response) => {
+    if (request.body?.confirmed !== true) {
+      response
+        .status(400)
+        .type('html')
+        .send(htmlPage('Confirmation required', 'Confirm that you want to remove your email address from the newsletter.'));
+      return;
+    }
+
     const result = await newsletterService.unsubscribe(request.params.token);
     response
       .status(result.ok ? 200 : 400)
       .type('html')
       .send(result.ok
-        ? htmlPage('Unsubscribed', 'You will no longer receive the DerivionAcademy newsletter.')
+        ? htmlPage('Unsubscribed', 'Your email address has been removed. You will no longer receive the DerivionAcademy newsletter.')
         : htmlPage('Unsubscribe link invalid', 'This unsubscribe link is invalid.'));
   }));
 

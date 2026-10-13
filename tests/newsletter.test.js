@@ -13,6 +13,7 @@ const config = {
   siteUrl: 'http://localhost:3000',
   tokenSecret: 'test-newsletter-token-secret-at-least-32-bytes',
   sesFromEmail: 'newsletter@example.com',
+  sesFromName: 'ISFT',
   awsRegion: 'ap-southeast-2',
   awsAccessKeyId: '',
   awsSecretAccessKey: '',
@@ -103,14 +104,33 @@ test('subscription endpoint validates and returns a safe success response', asyn
   });
 });
 
-test('verification and unsubscribe endpoints return simple HTML pages', async () => {
+test('verification returns an HTML page and unsubscribe asks for confirmation before deleting', async () => {
   const verified = await fetch(`${baseUrl}/api/newsletter/verify/verified-token`);
   assert.equal(verified.status, 200);
   assert.match(await verified.text(), /Your subscription is confirmed/);
 
-  const unsubscribed = await fetch(`${baseUrl}/api/newsletter/unsubscribe/valid-unsubscribe-token`);
-  assert.equal(unsubscribed.status, 200);
-  assert.match(await unsubscribed.text(), /You will no longer receive/);
+  const unsubscribed = await fetch(`${baseUrl}/api/newsletter/unsubscribe/valid-unsubscribe-token`, {
+    redirect: 'manual',
+  });
+  assert.equal(unsubscribed.status, 303);
+  assert.equal(
+    unsubscribed.headers.get('location'),
+    'http://localhost:3000/newsletter/unsubscribe?token=valid-unsubscribe-token',
+  );
+
+  const missingConfirmation = await fetch(`${baseUrl}/api/newsletter/unsubscribe/valid-unsubscribe-token`, {
+    method: 'POST',
+  });
+  assert.equal(missingConfirmation.status, 400);
+  assert.match(await missingConfirmation.text(), /Confirmation required/);
+
+  const confirmed = await fetch(`${baseUrl}/api/newsletter/unsubscribe/valid-unsubscribe-token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ confirmed: true }),
+  });
+  assert.equal(confirmed.status, 200);
+  assert.match(await confirmed.text(), /Your email address has been removed/);
 });
 
 test('test endpoints require the admin token', async () => {
@@ -182,7 +202,7 @@ test('SES service retries throttling and sends HTML mail', async () => {
   });
 
   assert.equal(calls, 2);
-  assert.equal(commands[1].input.Source, config.sesFromEmail);
+  assert.equal(commands[1].input.Source, '"ISFT" <newsletter@example.com>');
   assert.equal(commands[1].input.Destination.ToAddresses[0], 'reader@example.com');
   assert.equal(commands[1].input.Message.Body.Html.Data, '<h1>Hello</h1>');
 });
@@ -302,7 +322,7 @@ test('scheduled campaigns send only the active recipients in bounded batches', a
   assert.equal(await service.processDueNewsletters(), 1);
   assert.equal(sent.length, 3);
   assert.ok(maxSimultaneous <= config.sendConcurrency);
-  assert.ok(sent.every((message) => message.html.includes('/api/newsletter/unsubscribe/')));
+  assert.ok(sent.every((message) => message.html.includes('/newsletter/unsubscribe?token=')));
   assert.ok(sent.every((message) => message.text.includes('Unsubscribe:')));
   assert.ok([...deliveries.values()].every((status) => status === 'sent'));
 });
