@@ -27,8 +27,31 @@ try {
   await pool.end();
   throw new Error('Database connectivity check failed.');
 }
+const keepAliveIntervalMs = 30 * 1000;
+const keepAliveUrl = (process.env.RENDER_EXTERNAL_URL || (
+  config.nodeEnv === 'production' ? config.apiPublicUrl : ''
+)).replace(/\/+$/, '');
+let keepAliveInterval;
+async function pingSelf() {
+  try {
+    const response = await fetch(`${keepAliveUrl}/health`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) {
+      console.warn('Self-ping returned an unsuccessful status.', { status: response.status });
+    }
+  } catch (error) {
+    console.warn('Self-ping request failed.', {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 const server = app.listen(config.port, () => {
   console.info(`Newsletter Express API listening on port ${config.port}`);
+  if (keepAliveUrl) {
+    void pingSelf();
+  }
 });
 
 let newsletterProcessing;
@@ -54,24 +77,8 @@ async function processDueNewsletters() {
 const scheduledJob = cron.schedule(config.cronSchedule, processDueNewsletters);
 void processDueNewsletters();
 
-const keepAliveIntervalMs = 5 * 60 * 1000;
-let keepAliveInterval;
-async function pingSelf() {
-  try {
-    const response = await fetch(`${config.apiPublicUrl}/health`, {
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) {
-      console.warn('Self-ping returned an unsuccessful status.', { status: response.status });
-    }
-  } catch (error) {
-    console.warn('Self-ping request failed.', {
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
-
-if (config.nodeEnv === 'production' || process.env.RENDER_EXTERNAL_URL) {
+if (keepAliveUrl) {
+  console.info('Self-ping enabled.', { intervalSeconds: keepAliveIntervalMs / 1000 });
   keepAliveInterval = setInterval(() => void pingSelf(), keepAliveIntervalMs);
   keepAliveInterval.unref();
 }
