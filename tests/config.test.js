@@ -35,7 +35,6 @@ test('loads MySQL settings, AWS defaults and allowed origins', () => {
   ]);
 });
 
-<<<<<<< HEAD
 test('requires GoDaddy MySQL settings and validates the port', () => {
   for (const name of ['DB_HOST', 'DB_NAME', 'DB_USER']) {
     assert.throws(
@@ -54,13 +53,14 @@ test('requires GoDaddy MySQL settings and validates the port', () => {
   assert.throws(
     () => loadConfig(Object.fromEntries(Object.entries(env).filter(([name]) => name !== 'DB_HOST'))),
     /Missing required environment variable: DB_HOST/,
-=======
+  );
+});
+
 test('loads a custom SES sender display name and rejects header injection', () => {
   assert.equal(loadConfig({ ...env, SES_FROM_NAME: ' ISFT Weekly ' }).sesFromName, 'ISFT Weekly');
   assert.throws(
     () => loadConfig({ ...env, SES_FROM_NAME: 'ISFT\r\nBcc: attacker@example.com' }),
     /SES_FROM_NAME must not contain line breaks or angle brackets/,
->>>>>>> e7eef70 (database to neon)
   );
 });
 

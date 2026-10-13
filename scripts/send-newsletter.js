@@ -19,32 +19,35 @@ try {
     new URL('../../frontend/public/Newsletter/isft-weekly-newsletter.html', import.meta.url),
     'utf8',
   );
-  const { rows } = await pool.query(
-    `select
-       count(*) filter (where subscriber.status = 'active')::int as active_count,
-       count(*) filter (
-         where subscriber.status = 'active'
-           and not exists (
-             select 1
-             from public.newsletter_deliveries as delivery
-             join public.newsletters as newsletter on newsletter.id = delivery.newsletter_id
-             where newsletter.html_content = $1
-               and delivery.subscriber_id = subscriber.id
-               and delivery.status = 'sent'
+  const [rows] = await pool.execute(
+    `SELECT
+       COUNT(CASE WHEN subscriber.status = 'active' THEN 1 END) AS active_count,
+       COUNT(CASE
+         WHEN subscriber.status = 'active'
+           AND NOT EXISTS (
+             SELECT 1
+             FROM newsletter_deliveries AS delivery
+             JOIN newsletters AS newsletter ON newsletter.id = delivery.newsletter_id
+             WHERE newsletter.html_content = ?
+               AND delivery.subscriber_id = subscriber.id
+               AND delivery.status = 'sent'
            )
-       )::int as eligible_count
-     from public.subscribers as subscriber`,
+         THEN 1
+       END) AS eligible_count
+     FROM subscribers AS subscriber`,
     [htmlContent],
   );
-  if (rows[0].active_count === 0) {
+  const activeCount = Number(rows[0].active_count);
+  const eligibleCount = Number(rows[0].eligible_count);
+  if (activeCount === 0) {
     throw new Error('There are no active newsletter subscribers to send to.');
   }
-  if (!resend && rows[0].eligible_count === 0) {
+  if (!resend && eligibleCount === 0) {
     console.info('No unsent active subscribers for this newsletter. Existing recipients will not receive a duplicate.');
     process.exitCode = 0;
   } else {
     if (resend) {
-      console.info(`Resending as a new campaign to all ${rows[0].active_count} active subscriber(s).`);
+      console.info(`Resending as a new campaign to all ${activeCount} active subscriber(s).`);
     }
     const newsletterService = createNewsletterService({
       pool,

@@ -83,41 +83,24 @@ test('verification activates a pending subscriber and clears its token', async (
   assert.deepEqual(await service.verify('invalid'), { ok: false });
 });
 
-<<<<<<< HEAD
 test('unsubscribe marks a subscriber and is idempotent using affectedRows', async () => {
-=======
-test('unsubscribe deletes a subscriber and is idempotent', async () => {
->>>>>>> e7eef70 (database to neon)
   const subscriberId = '4a2e8658-13e8-4e66-a146-66ef051a7e48';
   const unsubscribeNonce = 'fdcb2571-ef39-4c49-aa98-c9a3f9f0a002';
-  let subscriberExists = true;
+  let active = true;
   const service = createNewsletterService({
     pool: {
-<<<<<<< HEAD
       async execute(sql, parameters) {
         if (sql.includes('UPDATE subscribers')) {
           assert.match(sql, /status = 'unsubscribed'/);
           assert.match(sql, /COALESCE\(unsubscribed_at, CURRENT_TIMESTAMP/);
           assert.deepEqual(parameters, [subscriberId, unsubscribeNonce]);
-          updateCount += 1;
-          return [{ affectedRows: updateCount === 1 ? 1 : 0 }];
+          if (!active) return [{ affectedRows: 0 }];
+          active = false;
+          return [{ affectedRows: 1 }];
         }
         assert.match(sql, /status = 'unsubscribed'/);
         assert.deepEqual(parameters, [subscriberId, unsubscribeNonce]);
         return [[{}]];
-=======
-      async query(sql, parameters) {
-        if (sql.includes('delete from public.subscribers')) {
-          assert.match(sql, /returning id/);
-          assert.deepEqual(parameters, [subscriberId, unsubscribeNonce]);
-          if (!subscriberExists) return { rowCount: 0 };
-          subscriberExists = false;
-          return { rowCount: 1 };
-        }
-        assert.match(sql, /select 1 from public\.subscribers where id = \$1/);
-        assert.deepEqual(parameters, [subscriberId]);
-        return { rowCount: subscriberExists ? 1 : 0 };
->>>>>>> e7eef70 (database to neon)
       },
     },
     emailService: {},
@@ -133,7 +116,6 @@ test('unsubscribe deletes a subscriber and is idempotent', async () => {
 test('manual sends reuse the campaign and send only to active subscribers without a sent delivery', async () => {
   const htmlContent = '<html><body><h1>Market update</h1></body></html>';
   let campaign = null;
-  let campaignNumber = 0;
   const deliveries = new Map();
   const subscribers = [
     {
@@ -142,68 +124,76 @@ test('manual sends reuse the campaign and send only to active subscribers withou
       unsubscribe_token: 'fdcb2571-ef39-4c49-aa98-c9a3f9f0a001',
     },
   ];
-  const client = {
-    async query(sql, parameters = []) {
-      if (sql === 'begin' || sql === 'commit' || sql === 'rollback') {
-        return { rows: [] };
+  const connection = {
+    async beginTransaction() {},
+    async commit() {},
+    async rollback() {},
+    release() {},
+    async execute(sql, parameters = []) {
+      if (sql.includes('GET_LOCK')) return [[{ acquired: 1 }]];
+      if (sql.includes('RELEASE_LOCK')) return [[{ released: 1 }]];
+      if (sql.includes('FROM newsletters')) {
+        return [[campaign?.title === parameters[0]
+          && campaign.subject === parameters[1]
+          && campaign.html_content === parameters[2]
+          ? campaign
+          : null].filter(Boolean)];
       }
-      if (sql.includes('pg_advisory_xact_lock')) {
-        return { rows: [] };
-      }
-      if (sql.includes('from public.newsletters')) {
-        return {
-          rows: campaign?.title === parameters[0]
-            && campaign.subject === parameters[1]
-            && campaign.html_content === parameters[2]
-            ? [campaign]
-            : [],
-        };
-      }
-      if (sql.includes('set status = \'sending\'')) {
+      if (sql.includes('UPDATE newsletters')) {
         campaign.status = 'sending';
-        return { rows: [campaign] };
+        return [{ affectedRows: 1 }];
       }
-      if (sql.includes('insert into public.newsletters')) {
-        campaignNumber += 1;
+      if (sql.includes('INSERT INTO newsletters')) {
         campaign = {
-          id: `newsletter-id-${campaignNumber}`,
-          title: parameters[0],
-          subject: parameters[1],
-          html_content: parameters[2],
+          id: parameters[0],
+          title: parameters[1],
+          subject: parameters[2],
+          html_content: parameters[3],
           status: 'sending',
         };
-        return { rows: [campaign] };
+        return [{ affectedRows: 1 }];
       }
       throw new Error(`Unexpected transaction query: ${sql}`);
     },
-    release() {},
   };
   const pool = {
-    connect: async () => client,
-    async query(sql, parameters = []) {
-      if (sql.includes('select subscriber.id, subscriber.email')) {
-        const [, lastId, limit] = parameters;
-        return {
-          rows: subscribers
+    async getConnection() { return connection; },
+    async execute(sql, parameters = []) {
+      if (sql.includes('SELECT subscriber.id, subscriber.email')) {
+        const [lastId, , limit] = parameters;
+        return [subscribers
             .filter((subscriber) => subscriber.id > lastId
               && deliveries.get(`${campaign.id}:${subscriber.id}`) !== 'sent')
-            .slice(0, limit),
-        };
+            .slice(0, limit)];
       }
-      if (sql.includes('insert into public.newsletter_deliveries')) {
-        deliveries.set(`${parameters[0]}:${parameters[1]}`, 'sending');
-        return { rows: [{ status: 'sending' }] };
+      if (sql.includes('INSERT INTO newsletter_deliveries')) {
+        const key = `${parameters[0]}:${parameters[1]}`;
+        if (deliveries.get(key) !== 'sent') {
+          deliveries.set(key, 'sending');
+        }
+        return [{ affectedRows: 1 }];
       }
-      if (sql.includes("set status = 'sent'")) {
+      if (sql.includes('SELECT status FROM newsletter_deliveries')) {
+        const status = deliveries.get(`${parameters[0]}:${parameters[1]}`);
+        return [[{ status }].filter((row) => row.status)];
+      }
+      if (sql.includes("SET status = 'sent'")) {
         deliveries.set(`${parameters[0]}:${parameters[1]}`, 'sent');
-        return { rows: [], rowCount: 1 };
+        return [{ affectedRows: 1 }];
       }
-      if (sql.includes('set updated_at = now() where id = $1 and status =')) {
-        return { rows: [], rowCount: 1 };
+      if (sql.includes("SET status = 'failed'")) {
+        deliveries.set(`${parameters[1]}:${parameters[2]}`, 'failed');
+        return [{ affectedRows: 1 }];
       }
-      if (sql.includes('set status = $2')) {
-        campaign.status = parameters[1];
-        return { rows: [], rowCount: 1 };
+      if (sql.includes('SET updated_at')) {
+        return [{ affectedRows: 1 }];
+      }
+      if (sql.includes('SET status = ?')) {
+        campaign.status = parameters[0];
+        return [{ affectedRows: 1 }];
+      }
+      if (sql.includes('UPDATE newsletters')) {
+        return [{ affectedRows: 1 }];
       }
       throw new Error(`Unexpected database query: ${sql}`);
     },
@@ -221,8 +211,10 @@ test('manual sends reuse the campaign and send only to active subscribers withou
     htmlContent,
   };
 
-  assert.deepEqual(await service.sendNewsletterNow(request), {
-    newsletterId: 'newsletter-id-1',
+  const firstResult = await service.sendNewsletterNow(request);
+  const firstCampaignId = firstResult.newsletterId;
+  assert.deepEqual(firstResult, {
+    newsletterId: firstCampaignId,
     status: 'sent',
     sentCount: 1,
     failedCount: 0,
@@ -235,23 +227,26 @@ test('manual sends reuse the campaign and send only to active subscribers withou
     unsubscribe_token: 'fdcb2571-ef39-4c49-aa98-c9a3f9f0a002',
   });
 
-  assert.deepEqual(await service.sendNewsletterNow(request), {
-    newsletterId: 'newsletter-id-1',
+  const secondResult = await service.sendNewsletterNow(request);
+  assert.deepEqual(secondResult, {
+    newsletterId: firstCampaignId,
     status: 'sent',
     sentCount: 1,
     failedCount: 0,
   });
   assert.equal(emailsSent, 2);
-  assert.equal(deliveries.get(`newsletter-id-1:${subscribers[0].id}`), 'sent');
-  assert.equal(deliveries.get(`newsletter-id-1:${subscribers[1].id}`), 'sent');
+  assert.equal(deliveries.get(`${firstCampaignId}:${subscribers[0].id}`), 'sent');
+  assert.equal(deliveries.get(`${firstCampaignId}:${subscribers[1].id}`), 'sent');
 
-  assert.deepEqual(await service.sendNewsletterNow({ ...request, resend: true }), {
-    newsletterId: 'newsletter-id-2',
+  const resendResult = await service.sendNewsletterNow({ ...request, resend: true });
+  assert.deepEqual(resendResult, {
+    newsletterId: resendResult.newsletterId,
     status: 'sent',
     sentCount: 2,
     failedCount: 0,
   });
   assert.equal(emailsSent, 4);
-  assert.equal(deliveries.get(`newsletter-id-2:${subscribers[0].id}`), 'sent');
-  assert.equal(deliveries.get(`newsletter-id-2:${subscribers[1].id}`), 'sent');
+  assert.notEqual(resendResult.newsletterId, firstCampaignId);
+  assert.equal(deliveries.get(`${resendResult.newsletterId}:${subscribers[0].id}`), 'sent');
+  assert.equal(deliveries.get(`${resendResult.newsletterId}:${subscribers[1].id}`), 'sent');
 });

@@ -83,25 +83,25 @@ test('subscription endpoint validates and returns a safe success response', asyn
     body: JSON.stringify({ email: 'reader@example.com' }),
   });
 
-  test('health endpoint reflects database readiness without exposing database errors', async () => {
-    const healthy = await fetch(`${baseUrl}/health`);
-    assert.equal(healthy.status, 200);
-    assert.deepEqual(await healthy.json(), { status: 'ok' });
-
-    databaseHealthy = false;
-    const unhealthy = await fetch(`${baseUrl}/health`);
-    assert.equal(unhealthy.status, 503);
-    const healthResponse = await unhealthy.text();
-    assert.deepEqual(JSON.parse(healthResponse), { status: 'error' });
-    assert.doesNotMatch(healthResponse, /private database error/);
-    databaseHealthy = true;
-  });
-
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('access-control-allow-origin'), 'http://localhost:3000');
   assert.deepEqual(await response.json(), {
     message: 'You are subscribed to the weekly newsletter.',
   });
+});
+
+test('health endpoint reflects database readiness without exposing database errors', async () => {
+  const healthy = await fetch(`${baseUrl}/health`);
+  assert.equal(healthy.status, 200);
+  assert.deepEqual(await healthy.json(), { status: 'ok' });
+
+  databaseHealthy = false;
+  const unhealthy = await fetch(`${baseUrl}/health`);
+  assert.equal(unhealthy.status, 503);
+  const healthResponse = await unhealthy.text();
+  assert.deepEqual(JSON.parse(healthResponse), { status: 'error' });
+  assert.doesNotMatch(healthResponse, /private database error/);
+  databaseHealthy = true;
 });
 
 test('verification returns an HTML page and unsubscribe asks for confirmation before deleting', async () => {
@@ -209,6 +209,8 @@ test('SES service retries throttling and sends HTML mail', async () => {
 
 test('graceful shutdown is idempotent and waits before closing the database pool', async () => {
   const calls = [];
+  const keepAliveInterval = setInterval(() => {}, 60_000);
+  keepAliveInterval.unref();
   const shutdown = createGracefulShutdown({
     server: {
       close(callback) {
@@ -217,6 +219,7 @@ test('graceful shutdown is idempotent and waits before closing the database pool
       },
     },
     scheduledJob: { stop() { calls.push('cron.stop'); } },
+    keepAliveInterval,
     pool: { async end() { calls.push('pool.end'); } },
     async waitForNewsletterProcessing() { calls.push('newsletter.wait'); },
     logger: { info() {}, error() {} },
@@ -226,6 +229,7 @@ test('graceful shutdown is idempotent and waits before closing the database pool
   const secondShutdown = shutdown('SIGINT');
   assert.equal(secondShutdown, firstShutdown);
   await firstShutdown;
+  assert.equal(keepAliveInterval.hasRef(), false);
   assert.deepEqual(calls, [
     'cron.stop',
     'server.close',

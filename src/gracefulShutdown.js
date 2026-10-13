@@ -1,6 +1,7 @@
 export function createGracefulShutdown({
   server,
   scheduledJob,
+  keepAliveInterval,
   pool,
   waitForNewsletterProcessing,
   logger = console,
@@ -13,6 +14,7 @@ export function createGracefulShutdown({
     shutdownPromise = (async () => {
       logger.info(`Received ${signal}; closing newsletter service.`);
       scheduledJob.stop();
+      clearInterval(keepAliveInterval);
       try {
         await new Promise((resolve, reject) => {
           server.close((error) => (error ? reject(error) : resolve()));

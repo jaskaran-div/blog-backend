@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createUnsubscribeToken, readUnsubscribeToken, isValidVerificationToken } from './tokens.js';
 import { isValidEmail, isValidHtml, normalizeEmail } from './validation.js';
 
@@ -91,19 +91,12 @@ export function createNewsletterService({ pool, emailService, config, logger = c
       return { ok: false };
     }
 
-<<<<<<< HEAD
     const [result] = await pool.execute(
       `UPDATE subscribers
        SET status = 'unsubscribed',
            unsubscribed_at = COALESCE(unsubscribed_at, CURRENT_TIMESTAMP(3)),
            verification_token = NULL
        WHERE id = ? AND unsubscribe_token = ? AND status = 'active'`,
-=======
-    const { rowCount } = await pool.query(
-      `delete from public.subscribers
-       where id = $1 and unsubscribe_token = $2
-       returning id`,
->>>>>>> e7eef70 (database to neon)
       [tokenClaims.subscriberId, tokenClaims.unsubscribeToken],
     );
 
@@ -111,20 +104,12 @@ export function createNewsletterService({ pool, emailService, config, logger = c
       return { ok: true };
     }
 
-<<<<<<< HEAD
     const [existing] = await pool.execute(
       `SELECT 1 FROM subscribers
        WHERE id = ? AND unsubscribe_token = ? AND status = 'unsubscribed'`,
       [tokenClaims.subscriberId, tokenClaims.unsubscribeToken],
     );
     return { ok: existing.length === 1 };
-=======
-    const existingSubscriber = await pool.query(
-      'select 1 from public.subscribers where id = $1',
-      [tokenClaims.subscriberId],
-    );
-    return { ok: existingSubscriber.rowCount === 0 };
->>>>>>> e7eef70 (database to neon)
   }
 
   async function sendTestEmail({ to, subject, htmlContent }) {
@@ -265,70 +250,123 @@ export function createNewsletterService({ pool, emailService, config, logger = c
       throw new Error('Provide newsletter HTML no larger than 450 KB.');
     }
 
-    const client = await pool.connect();
+    const connection = await pool.getConnection();
     let newsletter;
+    const lockName = `newsletter:${createHash('sha256')
+      .update(`${title}\0${subject}\0${htmlContent}`)
+      .digest('hex')
+      .slice(0, 40)}`;
+    let lockAcquired = false;
+    let transactionStarted = false;
+    let connectionDestroyed = false;
+    let sendError;
+
     try {
-      await client.query('begin');
-      await client.query(
-        'select pg_advisory_xact_lock(hashtext($1))',
-        [`newsletter:${title}:${subject}`],
+      const [lockRows] = await connection.execute(
+        'SELECT GET_LOCK(?, 0) AS acquired',
+        [lockName],
       );
-      const existing = resend
-        ? { rows: [] }
-        : await client.query(
-          `select id, title, subject, html_content, status
-           from public.newsletters
-           where title = $1 and subject = $2 and html_content = $3
-           order by created_at desc
-           limit 1
-           for update`,
+      if (lockRows[0]?.acquired !== 1) {
+        throw new Error('This newsletter campaign is already being processed.');
+      }
+      lockAcquired = true;
+
+      await connection.beginTransaction();
+      transactionStarted = true;
+      let campaigns = [];
+      if (!resend) {
+        [campaigns] = await connection.execute(
+          `SELECT id, title, subject, html_content, status
+           FROM newsletters
+           WHERE title = ? AND subject = ? AND html_content = ?
+           ORDER BY created_at DESC
+           LIMIT 1
+           FOR UPDATE`,
           [title, subject, htmlContent],
         );
+      }
 
-      if (existing.rows[0]) {
-        const campaign = existing.rows[0];
+      if (campaigns[0]) {
+        const campaign = campaigns[0];
         if (campaign.status === 'sending') {
           throw new Error(`This newsletter campaign is already ${campaign.status}.`);
         }
         if (!['draft', 'scheduled', 'failed', 'sent'].includes(campaign.status)) {
           throw new Error(`Cannot send a newsletter campaign with status "${campaign.status}".`);
         }
-        const updated = await client.query(
-          `update public.newsletters
-           set status = 'sending', send_at = now(), sent_at = null, updated_at = now()
-           where id = $1 and status = $2
-           returning id, title, subject, html_content`,
+        const [updated] = await connection.execute(
+          `UPDATE newsletters
+           SET status = 'sending', send_at = CURRENT_TIMESTAMP(3), sent_at = NULL,
+               updated_at = CURRENT_TIMESTAMP(3)
+           WHERE id = ? AND status = ?`,
           [campaign.id, campaign.status],
         );
-        if (!updated.rows[0]) {
+        if (updated.affectedRows !== 1) {
           throw new Error('The newsletter campaign changed before it could be sent.');
         }
-        newsletter = updated.rows[0];
+        newsletter = campaign;
       } else {
-        const inserted = await client.query(
-          `insert into public.newsletters
-             (title, subject, html_content, send_at, status)
-           values ($1, $2, $3, now(), 'sending')
-           returning id, title, subject, html_content`,
-          [title, subject, htmlContent],
+        newsletter = {
+          id: randomUUID(),
+          title,
+          subject,
+          html_content: htmlContent,
+        };
+        await connection.execute(
+          `INSERT INTO newsletters (id, title, subject, html_content, send_at, status)
+           VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP(3), 'sending')`,
+          [newsletter.id, title, subject, htmlContent],
         );
-        newsletter = inserted.rows[0];
       }
-      await client.query('commit');
+
+      await connection.commit();
+      transactionStarted = false;
     } catch (error) {
-      await client.query('rollback');
-      throw error;
+      sendError = error;
+      if (transactionStarted) {
+        try {
+          await connection.rollback();
+        } catch (rollbackError) {
+          sendError = new AggregateError(
+            [error, rollbackError],
+            'Newsletter campaign transaction failed.',
+          );
+        }
+      }
     } finally {
-      client.release();
+      if (lockAcquired) {
+        try {
+          const [releaseRows] = await connection.execute(
+            'SELECT RELEASE_LOCK(?) AS released',
+            [lockName],
+          );
+          if (releaseRows[0]?.released !== 1) {
+            throw new Error('MySQL newsletter campaign lock was not released.');
+          }
+        } catch (releaseError) {
+          connection.destroy();
+          connectionDestroyed = true;
+          sendError = sendError
+            ? new AggregateError([sendError, releaseError], 'Newsletter campaign cleanup failed.')
+            : releaseError;
+        }
+      }
+      if (!connectionDestroyed) {
+        connection.release();
+      }
+    }
+
+    if (sendError) {
+      throw sendError;
     }
 
     try {
       return { newsletterId: newsletter.id, ...(await sendNewsletter(newsletter)) };
     } catch (error) {
-      await pool.query(
-        `update public.newsletters
-         set status = 'failed', sent_at = null, updated_at = now()
-         where id = $1 and status = 'sending'`,
+      await pool.execute(
+        `UPDATE newsletters
+         SET status = 'failed', sent_at = NULL, updated_at = CURRENT_TIMESTAMP(3)
+         WHERE id = ? AND status = 'sending'`,
         [newsletter.id],
       );
       throw error;
