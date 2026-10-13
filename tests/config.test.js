@@ -19,12 +19,36 @@ test('loads Neon PostgreSQL settings, AWS defaults and allowed origins', () => {
   assert.equal(config.awsRegion, 'ap-southeast-2');
   assert.equal(config.sesFromName, 'ISFT');
   assert.equal(config.port, 4000);
+  assert.equal(config.trustProxyHops, 0);
   assert.equal(config.batchSize, 50);
   assert.equal(config.sendConcurrency, 5);
   assert.deepEqual(config.allowedOrigins, [
     'https://site.example.com',
     'http://localhost:3000',
   ]);
+});
+
+test('trusts the Render proxy by default and allows an explicit hop override', () => {
+  assert.equal(
+    loadConfig({ ...env, RENDER_EXTERNAL_URL: 'https://api.onrender.com' }).trustProxyHops,
+    1,
+  );
+  assert.equal(
+    loadConfig({
+      ...env,
+      RENDER_EXTERNAL_URL: 'https://api.onrender.com',
+      TRUST_PROXY_HOPS: '0',
+    }).trustProxyHops,
+    1,
+  );
+  assert.equal(
+    loadConfig({
+      ...env,
+      RENDER_EXTERNAL_URL: 'https://api.onrender.com',
+      TRUST_PROXY_HOPS: '2',
+    }).trustProxyHops,
+    2,
+  );
 });
 
 test('requires a valid PostgreSQL connection URL', () => {

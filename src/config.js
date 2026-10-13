@@ -84,11 +84,20 @@ export function loadConfig(env = process.env) {
     }
   }
 
+  const configuredTrustProxyHops = nonNegativeInteger(
+    env,
+    'TRUST_PROXY_HOPS',
+    env.RENDER_EXTERNAL_URL ? 1 : 0,
+  );
+  const trustProxyHops = env.RENDER_EXTERNAL_URL
+    ? Math.max(1, configuredTrustProxyHops)
+    : configuredTrustProxyHops;
+
   return {
     ...databaseConfig,
     ...emailConfig,
     nodeEnv: env.NODE_ENV ?? 'development',
-    trustProxyHops: nonNegativeInteger(env, 'TRUST_PROXY_HOPS', 0),
+    trustProxyHops,
     port: positiveInteger(env, 'PORT', 4000),
     siteUrl,
     apiPublicUrl,

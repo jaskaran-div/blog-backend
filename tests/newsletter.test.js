@@ -8,6 +8,7 @@ import { createUnsubscribeToken, readUnsubscribeToken } from '../src/tokens.js';
 
 const config = {
   allowedOrigins: ['http://localhost:3000'],
+  trustProxyHops: 1,
   adminToken: 'test-admin-token-secret-which-is-over-32-characters',
   apiPublicUrl: 'http://localhost:4000',
   siteUrl: 'http://localhost:3000',
@@ -79,7 +80,11 @@ after(async () => {
 test('subscription endpoint validates and returns a safe success response', async () => {
   const response = await fetch(`${baseUrl}/api/newsletter/subscribe`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', origin: 'http://localhost:3000' },
+    headers: {
+      'content-type': 'application/json',
+      origin: 'http://localhost:3000',
+      'x-forwarded-for': '203.0.113.10',
+    },
     body: JSON.stringify({ email: 'reader@example.com' }),
   });
 
