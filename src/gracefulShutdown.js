@@ -1,9 +1,11 @@
 export function createGracefulShutdown({
   server,
   scheduledJob,
+  additionalScheduledJobs = [],
   keepAliveInterval,
   pool,
   waitForNewsletterProcessing,
+  waitForBackgroundTasks = async () => {},
   logger = console,
 }) {
   let shutdownPromise;
@@ -14,6 +16,9 @@ export function createGracefulShutdown({
     shutdownPromise = (async () => {
       logger.info(`Received ${signal}; closing newsletter service.`);
       scheduledJob.stop();
+      for (const job of additionalScheduledJobs) {
+        job.stop();
+      }
       clearInterval(keepAliveInterval);
       try {
         await new Promise((resolve, reject) => {
@@ -27,6 +32,12 @@ export function createGracefulShutdown({
         await waitForNewsletterProcessing();
       } catch {
         logger.error('Could not finish scheduled newsletter processing.');
+        process.exitCode = 1;
+      }
+      try {
+        await waitForBackgroundTasks();
+      } catch {
+        logger.error('Could not finish background tasks.');
         process.exitCode = 1;
       }
       try {

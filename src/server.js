@@ -5,15 +5,18 @@ import { loadConfig } from './config.js';
 import { createDatabase } from './db.js';
 import { createEmailService } from './emailService.js';
 import { createGracefulShutdown } from './gracefulShutdown.js';
+import { createMarketSnapshotService } from './marketSnapshotService.js';
 import { createNewsletterService } from './newsletterService.js';
 
 const config = loadConfig();
 const pool = createDatabase(config);
 const emailService = createEmailService(config);
 const newsletterService = createNewsletterService({ pool, emailService, config });
+const marketSnapshotService = createMarketSnapshotService({ pool, config });
 const app = createApp({
   newsletterService,
   emailService,
+  marketSnapshotService,
   config,
   healthCheck: async () => pool.query('SELECT 1'),
 });
@@ -77,6 +80,53 @@ async function processDueNewsletters() {
 const scheduledJob = cron.schedule(config.cronSchedule, processDueNewsletters);
 void processDueNewsletters();
 
+let marketSnapshotRefresh;
+async function refreshMarketSnapshot(trigger) {
+  if (marketSnapshotRefresh) {
+    return marketSnapshotRefresh;
+  }
+  marketSnapshotRefresh = (async () => {
+    try {
+      await marketSnapshotService.refresh({ trigger });
+    } catch (error) {
+      console.error('Market snapshot refresh could not complete.', { trigger, code: error?.code ?? 'UNKNOWN' });
+    } finally {
+      marketSnapshotRefresh = null;
+    }
+  })();
+  return marketSnapshotRefresh;
+}
+
+const { timezone: marketTimezone, cronExpressions: marketCronExpressions } = config.marketSnapshot;
+const marketSnapshotJobs = marketCronExpressions.map((expression, index) => cron.schedule(
+  expression,
+  () => refreshMarketSnapshot('scheduled'),
+  { timezone: marketTimezone, name: `market-snapshot-${index + 1}`, noOverlap: true },
+));
+if (marketSnapshotJobs.length > 0) {
+  console.info('Market snapshot schedule enabled.', {
+    timezone: marketTimezone,
+    times: config.marketSnapshot.times,
+    days: config.marketSnapshot.days,
+  });
+} else {
+  console.info('Market snapshot schedule disabled; set MARKET_SNAPSHOT_TIMES to enable it.');
+}
+if (config.marketSnapshot.bootstrapIfEmpty) {
+  // Only fills an empty table, so restarts never change values between scheduled updates.
+  void (async () => {
+    try {
+      if (!(await marketSnapshotService.hasSuccessfulSnapshot())) {
+        await refreshMarketSnapshot('bootstrap');
+      }
+    } catch (error) {
+      console.warn('Market snapshot bootstrap check failed; run npm run db:migrate if the table is missing.', {
+        code: error?.code ?? 'UNKNOWN',
+      });
+    }
+  })();
+}
+
 if (keepAliveUrl) {
   console.info('Self-ping enabled.', { intervalSeconds: keepAliveIntervalMs / 1000 });
   keepAliveInterval = setInterval(() => void pingSelf(), keepAliveIntervalMs);
@@ -86,11 +136,17 @@ if (keepAliveUrl) {
 const shutdown = createGracefulShutdown({
   server,
   scheduledJob,
+  additionalScheduledJobs: marketSnapshotJobs,
   keepAliveInterval,
   pool,
   waitForNewsletterProcessing: async () => {
     if (newsletterProcessing) {
       await newsletterProcessing;
+    }
+  },
+  waitForBackgroundTasks: async () => {
+    if (marketSnapshotRefresh) {
+      await marketSnapshotRefresh;
     }
   },
 });

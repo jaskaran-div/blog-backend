@@ -1,4 +1,7 @@
+import cron from 'node-cron';
+
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const MARKET_TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 function required(env, name) {
   const value = env[name]?.trim();
@@ -96,6 +99,7 @@ export function loadConfig(env = process.env) {
   return {
     ...databaseConfig,
     ...emailConfig,
+    marketSnapshot: loadMarketSnapshotConfig(env),
     nodeEnv: env.NODE_ENV ?? 'development',
     trustProxyHops,
     port: positiveInteger(env, 'PORT', 4000),
@@ -108,6 +112,73 @@ export function loadConfig(env = process.env) {
     batchSize: Math.min(positiveInteger(env, 'NEWSLETTER_BATCH_SIZE', 50), 500),
     sendConcurrency: Math.min(positiveInteger(env, 'NEWSLETTER_SEND_CONCURRENCY', 5), 10),
     staleSendMinutes: positiveInteger(env, 'NEWSLETTER_STALE_SEND_MINUTES', 30),
+  };
+}
+
+function booleanFlag(env, name, fallback) {
+  const value = env[name]?.trim().toLowerCase();
+  if (!value) {
+    return fallback;
+  }
+  if (['true', '1', 'yes'].includes(value)) {
+    return true;
+  }
+  if (['false', '0', 'no'].includes(value)) {
+    return false;
+  }
+  throw new Error(`${name} must be true or false.`);
+}
+
+export function loadMarketSnapshotConfig(env = process.env) {
+  const timezone = env.MARKET_SNAPSHOT_TIMEZONE?.trim() || 'Asia/Kolkata';
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone });
+  } catch {
+    throw new Error('MARKET_SNAPSHOT_TIMEZONE must be a valid IANA timezone.');
+  }
+
+  const times = [...new Set((env.MARKET_SNAPSHOT_TIMES ?? '')
+    .split(',')
+    .map((time) => time.trim())
+    .filter(Boolean))];
+  for (const time of times) {
+    if (!MARKET_TIME_PATTERN.test(time)) {
+      throw new Error('MARKET_SNAPSHOT_TIMES must be a comma-separated list of 24-hour HH:MM times.');
+    }
+  }
+
+  const days = env.MARKET_SNAPSHOT_DAYS?.trim() || '*';
+  if (!cron.validate(`0 0 * * ${days}`)) {
+    throw new Error('MARKET_SNAPSHOT_DAYS must be a valid cron day-of-week field, for example * or 1-5.');
+  }
+
+  const minIntervalMinutes = Math.min(positiveInteger(env, 'MARKET_SNAPSHOT_MIN_INTERVAL_MINUTES', 10), 720);
+  const minutesOfDay = times
+    .map((time) => {
+      const [hour, minute] = time.split(':').map(Number);
+      return hour * 60 + minute;
+    })
+    .sort((first, second) => first - second);
+  for (let index = 0; index < minutesOfDay.length && minutesOfDay.length > 1; index += 1) {
+    const next = minutesOfDay[(index + 1) % minutesOfDay.length] + (index + 1 === minutesOfDay.length ? 1440 : 0);
+    if (next - minutesOfDay[index] <= minIntervalMinutes) {
+      throw new Error('MARKET_SNAPSHOT_TIMES entries must be further apart than MARKET_SNAPSHOT_MIN_INTERVAL_MINUTES.');
+    }
+  }
+
+  return {
+    timezone,
+    times,
+    days,
+    cronExpressions: times.map((time) => {
+      const [hour, minute] = time.split(':').map(Number);
+      return `${minute} ${hour} * * ${days}`;
+    }),
+    requestTimeoutMs: Math.min(positiveInteger(env, 'MARKET_SNAPSHOT_TIMEOUT_MS', 10_000), 60_000),
+    // Weekday-only schedules leave a weekend gap, so their default threshold covers Friday to Monday.
+    staleAfterHours: positiveInteger(env, 'MARKET_SNAPSHOT_STALE_AFTER_HOURS', days === '*' ? 36 : 84),
+    minIntervalMinutes,
+    bootstrapIfEmpty: booleanFlag(env, 'MARKET_SNAPSHOT_BOOTSTRAP_IF_EMPTY', true),
   };
 }
 

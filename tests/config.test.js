@@ -84,3 +84,45 @@ test('rejects partial AWS credentials and weak token secrets', () => {
     /NEWSLETTER_TOKEN_SECRET must contain at least 32 bytes/,
   );
 });
+
+test('market snapshot schedule is disabled by default and uses Asia/Kolkata', () => {
+  const { marketSnapshot } = loadConfig(env);
+
+  assert.equal(marketSnapshot.timezone, 'Asia/Kolkata');
+  assert.deepEqual(marketSnapshot.times, []);
+  assert.deepEqual(marketSnapshot.cronExpressions, []);
+  assert.equal(marketSnapshot.requestTimeoutMs, 10_000);
+  assert.equal(marketSnapshot.staleAfterHours, 36);
+  assert.equal(marketSnapshot.minIntervalMinutes, 10);
+  assert.equal(marketSnapshot.bootstrapIfEmpty, true);
+});
+
+test('market snapshot times become cron expressions in the configured days', () => {
+  const { marketSnapshot } = loadConfig({
+    ...env,
+    MARKET_SNAPSHOT_TIMES: ' 08:30, 20:05 ,08:30',
+    MARKET_SNAPSHOT_DAYS: '1-5',
+    MARKET_SNAPSHOT_BOOTSTRAP_IF_EMPTY: 'false',
+  });
+
+  assert.deepEqual(marketSnapshot.times, ['08:30', '20:05']);
+  assert.deepEqual(marketSnapshot.cronExpressions, ['30 8 * * 1-5', '5 20 * * 1-5']);
+  assert.equal(marketSnapshot.staleAfterHours, 84);
+  assert.equal(marketSnapshot.bootstrapIfEmpty, false);
+  assert.equal(loadConfig({ ...env, MARKET_SNAPSHOT_STALE_AFTER_HOURS: '12' }).marketSnapshot.staleAfterHours, 12);
+});
+
+test('rejects invalid market snapshot settings', () => {
+  for (const [name, value, message] of [
+    ['MARKET_SNAPSHOT_TIMES', '9:00', /24-hour HH:MM/],
+    ['MARKET_SNAPSHOT_TIMES', '24:00', /24-hour HH:MM/],
+    ['MARKET_SNAPSHOT_TIMES', '09:00,09:05', /further apart/],
+    ['MARKET_SNAPSHOT_TIMES', '23:58,00:03', /further apart/],
+    ['MARKET_SNAPSHOT_TIMEZONE', 'Mars/Olympus', /valid IANA timezone/],
+    ['MARKET_SNAPSHOT_DAYS', '9', /day-of-week/],
+    ['MARKET_SNAPSHOT_TIMEOUT_MS', '0', /positive integer/],
+    ['MARKET_SNAPSHOT_BOOTSTRAP_IF_EMPTY', 'maybe', /true or false/],
+  ]) {
+    assert.throws(() => loadConfig({ ...env, [name]: value }), message, `${name}=${value}`);
+  }
+});

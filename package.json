@@ -13,6 +13,7 @@
     "db:migrate": "node scripts/migrate.js",
     "newsletter:send": "node scripts/send-newsletter.js",
     "newsletter:preview": "node scripts/send-newsletter-preview.js",
+    "market:refresh": "node scripts/refresh-market-snapshot.js",
     "ses:test": "node scripts/ses-check.js"
   },
   "dependencies": {

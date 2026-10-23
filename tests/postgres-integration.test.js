@@ -4,6 +4,7 @@ import test from 'node:test';
 import { createDatabase } from '../src/db.js';
 import { loadDatabaseConfig } from '../src/config.js';
 import { migrateDatabase } from '../src/migrations.js';
+import { createMarketSnapshotService } from '../src/marketSnapshotService.js';
 import { createNewsletterService } from '../src/newsletterService.js';
 import { createUnsubscribeToken } from '../src/tokens.js';
 
@@ -203,6 +204,85 @@ test('PostgreSQL migration, subscription lifecycle, concurrent claims, delivery 
         await pool.query('DELETE FROM subscribers WHERE id = ANY($1::uuid[])', [subscriberIds]);
       }
     }
+    await pool.end();
+  }
+});
+
+test('PostgreSQL market snapshot refresh, advisory lock, failure preservation and read', {
+  skip: !integrationEnabled,
+}, async () => {
+  const pool = createDatabase(loadDatabaseConfig());
+  // Test-only instrument IDs so production snapshot rows are never touched.
+  const instrumentId = `ITEST_${randomBytes(4).toString('hex').toUpperCase()}`;
+  const feeds = [{
+    id: 'integration-rates',
+    url: 'https://snapdata.integration.test/rates/world/latest.json',
+    dataset: 'rates',
+    scope: 'world',
+    unit: 'percent',
+    currency: 'USD',
+    instruments: [{ id: instrumentId, sourceInstrument: 'UST2Y', displayName: 'Integration 2Y', min: -5, max: 30 }],
+  }];
+  const marketConfig = { marketSnapshot: { requestTimeoutMs: 2000, staleAfterHours: 36, minIntervalMinutes: 10 } };
+  const logger = { info() {}, warn() {}, error() {} };
+  const startedAt = new Date();
+  const ratesBody = JSON.stringify({
+    schema_version: '1.0',
+    generated_at: '2026-10-20T21:30:00Z',
+    dataset: 'rates',
+    scope: 'world',
+    resolution: 'daily',
+    unit: { quantity: 'percent', currency: 'USD' },
+    sources: [{ id: 'treasury', name: 'US Department of the Treasury', url: 'https://home.treasury.gov/' }],
+    observations: [{ date: '2026-10-20', instrument: 'UST2Y', value: 4.79, prev_close: 4.77, change_pct: 0.4193, status: 'provisional', filled_from: null, source: 'treasury' }],
+  });
+  const okResponse = () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'application/json' },
+    async text() { return ratesBody; },
+  });
+
+  try {
+    await migrateDatabase(pool);
+
+    let releaseFetch;
+    const fetchHeld = new Promise((resolve) => { releaseFetch = resolve; });
+    const first = createMarketSnapshotService({
+      pool, config: marketConfig, logger, feeds,
+      fetchImpl: async () => { await fetchHeld; return okResponse(); },
+    });
+    const second = createMarketSnapshotService({
+      pool, config: marketConfig, logger, feeds,
+      fetchImpl: async () => { throw new Error('Unexpected concurrent fetch'); },
+    });
+    const firstRefresh = first.refresh({ trigger: 'manual', force: true });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(await second.refresh({ trigger: 'manual', force: true }), { status: 'skipped', reason: 'locked' });
+    releaseFetch();
+    assert.equal((await firstRefresh).status, 'succeeded');
+
+    const failing = createMarketSnapshotService({
+      pool, config: marketConfig, logger, feeds,
+      fetchImpl: async () => ({ ok: false, status: 503, headers: { get: () => 'text/html' }, async text() { return ''; } }),
+    });
+    assert.equal((await failing.refresh({ trigger: 'manual', force: true })).status, 'failed');
+
+    const snapshot = await failing.getLatestSnapshot();
+    const [item] = snapshot.instruments;
+    assert.equal(item.id, instrumentId);
+    assert.equal(item.value, 4.79);
+    assert.equal(item.previousClose, 4.77);
+    assert.equal(item.change, 0.02);
+    assert.equal(item.dataDate, '2026-10-20');
+    assert.equal(item.lastAttemptStatus, 'error');
+    assert.equal(snapshot.status, 'partial');
+  } finally {
+    await pool.query('DELETE FROM market_snapshots WHERE instrument = $1', [instrumentId]).catch(() => {});
+    await pool.query(
+      `DELETE FROM market_snapshot_runs WHERE run_trigger = 'manual' AND started_at >= $1 AND details::text LIKE $2`,
+      [startedAt, `%${instrumentId}%`],
+    ).catch(() => {});
     await pool.end();
   }
 });

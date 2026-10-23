@@ -243,6 +243,38 @@ test('graceful shutdown is idempotent and waits before closing the database pool
   ]);
 });
 
+test('graceful shutdown stops market snapshot jobs and waits for a running refresh', async () => {
+  const calls = [];
+  const shutdown = createGracefulShutdown({
+    server: {
+      close(callback) {
+        calls.push('server.close');
+        callback();
+      },
+    },
+    scheduledJob: { stop() { calls.push('cron.stop'); } },
+    additionalScheduledJobs: [
+      { stop() { calls.push('market.cron.stop.1'); } },
+      { stop() { calls.push('market.cron.stop.2'); } },
+    ],
+    pool: { async end() { calls.push('pool.end'); } },
+    async waitForNewsletterProcessing() { calls.push('newsletter.wait'); },
+    async waitForBackgroundTasks() { calls.push('market.wait'); },
+    logger: { info() {}, error() {} },
+  });
+
+  await shutdown('SIGTERM');
+  assert.deepEqual(calls, [
+    'cron.stop',
+    'market.cron.stop.1',
+    'market.cron.stop.2',
+    'server.close',
+    'newsletter.wait',
+    'market.wait',
+    'pool.end',
+  ]);
+});
+
 test('scheduled campaigns send only the active recipients in bounded batches', async () => {
   const subscribers = [
     { id: '00000000-0000-4000-8000-000000000001', email: 'one@example.com', unsubscribe_token: 'fdcb2571-ef39-4c49-aa98-c9a3f9f0a001' },

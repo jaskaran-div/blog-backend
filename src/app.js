@@ -1,11 +1,13 @@
 import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
+import { createMarketRouter } from './routes/market.js';
 import { createNewsletterRouter } from './routes/newsletter.js';
 
 export function createApp({
   newsletterService,
   emailService,
+  marketSnapshotService,
   config,
   healthCheck = async () => {},
   logger = console,
@@ -42,6 +44,9 @@ export function createApp({
     config,
     logger,
   }));
+  if (marketSnapshotService) {
+    app.use('/api/market', createMarketRouter({ marketSnapshotService, logger }));
+  }
 
   app.use((request, response) => {
     response.status(404).json({ message: 'Route not found.' });

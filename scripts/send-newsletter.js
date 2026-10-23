@@ -54,8 +54,8 @@ try {
       config,
     });
     const result = await newsletterService.sendNewsletterNow({
-      title: 'ISFT Weekly Newsletter — 09 Oct 2026',
-      subject: 'ISFT Weekly Newsletter | 09 Oct 2026',
+      title: 'ISFT Weekly Newsletter — 16 Oct 2026',
+      subject: 'ISFT Weekly Newsletter | 16 Oct 2026',
       htmlContent,
       resend,
     });

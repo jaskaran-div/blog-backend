@@ -66,3 +66,47 @@ CREATE TABLE IF NOT EXISTS newsletter_deliveries (
 
 CREATE INDEX IF NOT EXISTS newsletter_deliveries_status_idx
   ON newsletter_deliveries (newsletter_id, status);
+
+-- Market data snapshots shown in the article sidebar. One row per instrument keeps the
+-- latest successful values; failed refreshes only update the attempt/error columns.
+CREATE TABLE IF NOT EXISTS market_snapshots (
+  instrument TEXT PRIMARY KEY CHECK (instrument ~ '^[A-Z0-9_.]{1,40}$'),
+  display_name TEXT NOT NULL CHECK (LENGTH(TRIM(display_name)) BETWEEN 1 AND 100),
+  dataset TEXT NOT NULL CHECK (LENGTH(TRIM(dataset)) BETWEEN 1 AND 40),
+  value NUMERIC(20, 6),
+  previous_close NUMERIC(20, 6),
+  change NUMERIC(20, 6),
+  change_percent NUMERIC(14, 6),
+  unit TEXT,
+  currency TEXT,
+  source_id TEXT,
+  source_name TEXT,
+  source_url TEXT,
+  source_status TEXT,
+  data_date DATE,
+  filled_from DATE,
+  source_generated_at TIMESTAMPTZ,
+  fetched_at TIMESTAMPTZ,
+  last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  status TEXT NOT NULL CHECK (status IN ('ok', 'error')),
+  last_error TEXT CHECK (last_error IS NULL OR LENGTH(last_error) <= 500),
+  last_error_at TIMESTAMPTZ,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+  CONSTRAINT market_snapshots_value_state_check CHECK (
+    (value IS NULL AND fetched_at IS NULL AND data_date IS NULL)
+    OR (value IS NOT NULL AND fetched_at IS NOT NULL AND data_date IS NOT NULL AND source_id IS NOT NULL)
+  )
+);
+
+CREATE TABLE IF NOT EXISTS market_snapshot_runs (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  run_trigger TEXT NOT NULL CHECK (run_trigger IN ('scheduled', 'bootstrap', 'manual')),
+  status TEXT NOT NULL DEFAULT 'running'
+    CHECK (status IN ('running', 'succeeded', 'partial', 'failed')),
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  finished_at TIMESTAMPTZ,
+  details JSONB
+);
+
+CREATE INDEX IF NOT EXISTS market_snapshot_runs_started_at_idx
+  ON market_snapshot_runs (started_at DESC);
