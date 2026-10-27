@@ -41,9 +41,15 @@ const SANITIZE_OPTIONS = {
   },
   nonTextTags: ['script', 'style', 'textarea', 'option', 'noscript', 'title', 'head'],
   transformTags: {
-    a: (tagName, attribs) => ({
+    a: (tagName, { title, ...attribs }) => ({
       tagName,
-      attribs: { ...attribs, target: '_blank', rel: 'noopener noreferrer' },
+      // Outlook's "Protected by Outlook: <tracking URL>" tooltip would expose the tracker; drop it.
+      attribs: {
+        ...attribs,
+        ...(title && !/^Protected by Outlook:/i.test(title) ? { title } : {}),
+        target: '_blank',
+        rel: 'noopener noreferrer',
+      },
     }),
     img: (tagName, attribs) => ({ tagName, attribs: { ...attribs, loading: 'lazy' } }),
   },

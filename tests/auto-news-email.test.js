@@ -234,3 +234,9 @@ test('unwraps safelinks, resolves AWeber trackers, drops utm params and unresolv
     + '<a>Bad</a>');
   assert.deepEqual(resolved.sort(), [aweber('dead'), aweber('ok')]);
 });
+
+test('drops Outlook "Protected by Outlook" tooltips that expose tracking URLs, keeps normal titles', () => {
+  const html = sanitizeNewsHtml('<a href="https://ft.com/a" title="Protected by Outlook: https://clicks.aweber.com/y/ct/?l=1. Click or tap to follow the link.">FT</a><a href="https://ft.com/b" title="Read more">B</a>');
+  assert.doesNotMatch(html, /aweber|Protected by Outlook/);
+  assert.match(html, /<a href="https:\/\/ft.com\/b" title="Read more"/);
+});
