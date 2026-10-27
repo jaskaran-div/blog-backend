@@ -1,6 +1,7 @@
 import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
+import { createAutoNewsRouter } from './routes/autoNews.js';
 import { createMarketRouter } from './routes/market.js';
 import { createNewsletterRouter } from './routes/newsletter.js';
 
@@ -8,6 +9,8 @@ export function createApp({
   newsletterService,
   emailService,
   marketSnapshotService,
+  autoNewsService,
+  runAutoNewsImport,
   config,
   healthCheck = async () => {},
   logger = console,
@@ -46,6 +49,14 @@ export function createApp({
   }));
   if (marketSnapshotService) {
     app.use('/api/market', createMarketRouter({ marketSnapshotService, logger }));
+  }
+  if (autoNewsService) {
+    app.use('/api/auto-news', createAutoNewsRouter({
+      autoNewsService,
+      config,
+      runImport: runAutoNewsImport,
+      logger,
+    }));
   }
 
   app.use((request, response) => {

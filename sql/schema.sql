@@ -110,3 +110,33 @@ CREATE TABLE IF NOT EXISTS market_snapshot_runs (
 
 CREATE INDEX IF NOT EXISTS market_snapshot_runs_started_at_idx
   ON market_snapshot_runs (started_at DESC);
+
+-- Automated News & Insights posts imported from Gmail. A dedicated table: it never reads or
+-- changes the subscription tables or any previously created article table.
+CREATE TABLE IF NOT EXISTS automated_news_posts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  gmail_message_id TEXT NOT NULL CHECK (gmail_message_id ~ '^[A-Za-z0-9_-]{1,128}$'),
+  sender TEXT NOT NULL CHECK (LENGTH(sender) BETWEEN 3 AND 254),
+  title TEXT NOT NULL CHECK (LENGTH(TRIM(title)) BETWEEN 1 AND 998),
+  slug TEXT NOT NULL CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$' AND LENGTH(slug) <= 140),
+  excerpt TEXT NOT NULL DEFAULT '' CHECK (LENGTH(excerpt) <= 400),
+  html_content TEXT NOT NULL DEFAULT '' CHECK (LENGTH(html_content) <= 2000000),
+  cover_image_url TEXT,
+  images JSONB NOT NULL DEFAULT '[]'::jsonb,
+  links JSONB NOT NULL DEFAULT '[]'::jsonb,
+  published_at TIMESTAMPTZ NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft', 'published', 'failed', 'rejected')),
+  attempts INTEGER NOT NULL DEFAULT 1 CHECK (attempts >= 0),
+  last_error TEXT CHECK (last_error IS NULL OR LENGTH(last_error) <= 500),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT automated_news_posts_gmail_message_id_key UNIQUE (gmail_message_id),
+  CONSTRAINT automated_news_posts_slug_key UNIQUE (slug),
+  CONSTRAINT automated_news_posts_content_check CHECK (
+    status IN ('failed', 'rejected') OR LENGTH(TRIM(html_content)) > 0
+  )
+);
+
+CREATE INDEX IF NOT EXISTS automated_news_posts_published_idx
+  ON automated_news_posts (published_at DESC) WHERE status = 'published';

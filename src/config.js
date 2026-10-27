@@ -100,6 +100,7 @@ export function loadConfig(env = process.env) {
     ...databaseConfig,
     ...emailConfig,
     marketSnapshot: loadMarketSnapshotConfig(env),
+    autoNews: loadAutoNewsConfig(env),
     nodeEnv: env.NODE_ENV ?? 'development',
     trustProxyHops,
     port: positiveInteger(env, 'PORT', 4000),
@@ -179,6 +180,117 @@ export function loadMarketSnapshotConfig(env = process.env) {
     staleAfterHours: positiveInteger(env, 'MARKET_SNAPSHOT_STALE_AFTER_HOURS', days === '*' ? 36 : 84),
     minIntervalMinutes,
     bootstrapIfEmpty: booleanFlag(env, 'MARKET_SNAPSHOT_BOOTSTRAP_IF_EMPTY', true),
+  };
+}
+
+// Gmail checks run inside the 13:00-13:59 and 16:00-16:59 IST hours, Sunday (0) to Friday (5).
+export const AUTO_NEWS_TIMEZONE = 'Asia/Kolkata';
+export const AUTO_NEWS_WINDOW_HOURS = [13, 16];
+export const AUTO_NEWS_DAYS = '0-5';
+
+export function loadAutoNewsConfig(env = process.env, { requireCredentials } = {}) {
+  const enabled = booleanFlag(env, 'AUTO_NEWS_ENABLED', false);
+  const mustHaveCredentials = requireCredentials ?? enabled;
+
+  const sender = (env.AUTO_NEWS_SENDER?.trim() || 'neil.crammond@zenithwavecapital.com').toLowerCase();
+  if (!EMAIL_PATTERN.test(sender)) {
+    throw new Error('AUTO_NEWS_SENDER must be a valid email address.');
+  }
+
+  // Exact extra DKIM signing domains (no wildcards). Google Workspace's default key domain has the
+  // form <sender-domain-with-dashes>.<digits>.gappssmtp.com and must belong to the sender's domain.
+  const senderDomain = sender.split('@')[1];
+  const workspaceDomain = new RegExp(`^${senderDomain.replace(/\./g, '-').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.\\d+\\.gappssmtp\\.com$`);
+  const trustedDkimDomains = [...new Set((env.AUTO_NEWS_TRUSTED_DKIM_DOMAINS ?? '')
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean))];
+  for (const value of trustedDkimDomains) {
+    if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(value)) {
+      throw new Error('AUTO_NEWS_TRUSTED_DKIM_DOMAINS must be a comma-separated list of exact domain names.');
+    }
+    if ((value === 'gappssmtp.com' || value.endsWith('.gappssmtp.com')) && !workspaceDomain.test(value)) {
+      throw new Error('AUTO_NEWS_TRUSTED_DKIM_DOMAINS gappssmtp.com entries must be the sender domain\'s own Google Workspace key domain.');
+    }
+  }
+
+  const importToken = env.AUTO_NEWS_IMPORT_TOKEN?.trim() || '';
+  if (importToken && Buffer.byteLength(importToken, 'utf8') < 32) {
+    throw new Error('AUTO_NEWS_IMPORT_TOKEN must contain at least 32 bytes.');
+  }
+  if (enabled && !importToken) {
+    throw new Error('AUTO_NEWS_IMPORT_TOKEN is required when AUTO_NEWS_ENABLED is true.');
+  }
+
+  const intervalMinutes = Math.min(positiveInteger(env, 'AUTO_NEWS_CHECK_INTERVAL_MINUTES', 10), 60);
+
+  const gmail = {
+    clientId: env.GMAIL_CLIENT_ID?.trim() || '',
+    clientSecret: env.GMAIL_CLIENT_SECRET?.trim() || '',
+    refreshToken: env.GMAIL_REFRESH_TOKEN?.trim() || '',
+    user: env.GMAIL_USER?.trim() || 'me',
+  };
+
+  let cloudinary = {
+    cloudName: env.CLOUDINARY_CLOUD_NAME?.trim() || '',
+    apiKey: env.CLOUDINARY_API_KEY?.trim() || '',
+    apiSecret: env.CLOUDINARY_API_SECRET?.trim() || '',
+  };
+  const cloudinaryUrl = env.CLOUDINARY_URL?.trim();
+  if (cloudinaryUrl && !cloudinary.cloudName) {
+    let parsed;
+    try {
+      parsed = new URL(cloudinaryUrl);
+    } catch {
+      throw new Error('CLOUDINARY_URL must look like cloudinary://API_KEY:API_SECRET@CLOUD_NAME.');
+    }
+    if (parsed.protocol !== 'cloudinary:') {
+      throw new Error('CLOUDINARY_URL must look like cloudinary://API_KEY:API_SECRET@CLOUD_NAME.');
+    }
+    cloudinary = {
+      cloudName: parsed.hostname,
+      apiKey: decodeURIComponent(parsed.username),
+      apiSecret: decodeURIComponent(parsed.password),
+    };
+  }
+
+  if (mustHaveCredentials) {
+    for (const [name, value] of [
+      ['GMAIL_CLIENT_ID', gmail.clientId],
+      ['GMAIL_CLIENT_SECRET', gmail.clientSecret],
+      ['GMAIL_REFRESH_TOKEN', gmail.refreshToken],
+      ['CLOUDINARY_CLOUD_NAME (or CLOUDINARY_URL)', cloudinary.cloudName],
+      ['CLOUDINARY_API_KEY (or CLOUDINARY_URL)', cloudinary.apiKey],
+      ['CLOUDINARY_API_SECRET (or CLOUDINARY_URL)', cloudinary.apiSecret],
+    ]) {
+      if (!value) {
+        throw new Error(`Missing required environment variable for automated news: ${name}`);
+      }
+    }
+  }
+
+  const cloudinaryFolder = env.AUTO_NEWS_CLOUDINARY_FOLDER?.trim() || 'derivion/auto-news';
+  if (!/^[\w-]+(\/[\w-]+)*$/.test(cloudinaryFolder)) {
+    throw new Error('AUTO_NEWS_CLOUDINARY_FOLDER may only contain letters, numbers, _, - and / separators.');
+  }
+
+  return {
+    enabled,
+    autoPublish: booleanFlag(env, 'AUTO_NEWS_AUTO_PUBLISH', false),
+    sender,
+    requireSenderAuth: booleanFlag(env, 'AUTO_NEWS_REQUIRE_SENDER_AUTH', true),
+    trustedDkimDomains,
+    importToken,
+    timezone: AUTO_NEWS_TIMEZONE,
+    windowHours: AUTO_NEWS_WINDOW_HOURS,
+    days: AUTO_NEWS_DAYS,
+    intervalMinutes,
+    cronExpression: `*/${intervalMinutes} ${AUTO_NEWS_WINDOW_HOURS.join(',')} * * ${AUTO_NEWS_DAYS}`,
+    lookbackDays: Math.min(positiveInteger(env, 'AUTO_NEWS_LOOKBACK_DAYS', 3), 30),
+    maxAttempts: Math.min(positiveInteger(env, 'AUTO_NEWS_MAX_ATTEMPTS', 5), 50),
+    gmail,
+    cloudinary,
+    cloudinaryFolder,
   };
 }
 

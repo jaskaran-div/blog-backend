@@ -9,3 +9,6 @@ node_modules/
 # Local tooling output
 coverage/
 npm-debug.log*
+
+# Local automated news previews (npm run auto-news -- preview <slug>)
+preview/

@@ -14,16 +14,19 @@
     "newsletter:send": "node scripts/send-newsletter.js",
     "newsletter:preview": "node scripts/send-newsletter-preview.js",
     "market:refresh": "node scripts/refresh-market-snapshot.js",
+    "auto-news": "node scripts/auto-news.js",
     "ses:test": "node scripts/ses-check.js"
   },
   "dependencies": {
     "@aws-sdk/client-ses": "^3.800.0",
+    "cloudinary": "^2.11.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^5.1.0",
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.1.0",
     "node-cron": "^4.2.1",
-    "pg": "^8.23.1"
+    "pg": "^8.23.1",
+    "sanitize-html": "^2.18.1"
   }
 }

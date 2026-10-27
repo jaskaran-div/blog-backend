@@ -1,9 +1,12 @@
 import 'dotenv/config';
 import cron from 'node-cron';
 import { createApp } from './app.js';
+import { createAutoNewsService } from './autoNewsService.js';
+import { createCloudinaryUploader } from './cloudinaryUploader.js';
 import { loadConfig } from './config.js';
 import { createDatabase } from './db.js';
 import { createEmailService } from './emailService.js';
+import { createGmailClient } from './gmailClient.js';
 import { createGracefulShutdown } from './gracefulShutdown.js';
 import { createMarketSnapshotService } from './marketSnapshotService.js';
 import { createNewsletterService } from './newsletterService.js';
@@ -13,10 +16,34 @@ const pool = createDatabase(config);
 const emailService = createEmailService(config);
 const newsletterService = createNewsletterService({ pool, emailService, config });
 const marketSnapshotService = createMarketSnapshotService({ pool, config });
+// Read endpoints always work; Gmail and Cloudinary are only contacted when AUTO_NEWS_ENABLED is true.
+const autoNewsService = createAutoNewsService({
+  pool,
+  config: config.autoNews,
+  gmail: config.autoNews.enabled ? createGmailClient(config.autoNews.gmail) : null,
+  uploadImage: config.autoNews.enabled ? createCloudinaryUploader(config.autoNews.cloudinary) : null,
+});
+
+let autoNewsImport;
+function runAutoNewsImport(options) {
+  // Dry runs never write, so they need not wait for (or share) an in-flight import.
+  if (options?.dryRun) {
+    return autoNewsService.runImport(options);
+  }
+  if (!autoNewsImport) {
+    autoNewsImport = autoNewsService.runImport(options).finally(() => {
+      autoNewsImport = null;
+    });
+  }
+  return autoNewsImport;
+}
+
 const app = createApp({
   newsletterService,
   emailService,
   marketSnapshotService,
+  autoNewsService,
+  runAutoNewsImport,
   config,
   healthCheck: async () => pool.query('SELECT 1'),
 });
@@ -127,6 +154,30 @@ if (config.marketSnapshot.bootstrapIfEmpty) {
   })();
 }
 
+const autoNewsJobs = [];
+if (config.autoNews.enabled) {
+  autoNewsJobs.push(cron.schedule(config.autoNews.cronExpression, async () => {
+    try {
+      const result = await runAutoNewsImport({ trigger: 'scheduled' });
+      if (result.results?.length > 0) {
+        console.info('Automated news check finished.', {
+          checked: result.checked,
+          results: result.results.map(({ slug, status }) => ({ slug, status })),
+        });
+      }
+    } catch (error) {
+      console.error('Automated news check failed.', { code: error?.code ?? 'UNKNOWN' });
+    }
+  }, { timezone: config.autoNews.timezone, name: 'auto-news-gmail-check', noOverlap: true }));
+  console.info('Automated news Gmail checks enabled.', {
+    timezone: config.autoNews.timezone,
+    schedule: config.autoNews.cronExpression,
+    autoPublish: config.autoNews.autoPublish,
+  });
+} else {
+  console.info('Automated news Gmail checks disabled; set AUTO_NEWS_ENABLED=true to enable them.');
+}
+
 if (keepAliveUrl) {
   console.info('Self-ping enabled.', { intervalSeconds: keepAliveIntervalMs / 1000 });
   keepAliveInterval = setInterval(() => void pingSelf(), keepAliveIntervalMs);
@@ -136,7 +187,7 @@ if (keepAliveUrl) {
 const shutdown = createGracefulShutdown({
   server,
   scheduledJob,
-  additionalScheduledJobs: marketSnapshotJobs,
+  additionalScheduledJobs: [...marketSnapshotJobs, ...autoNewsJobs],
   keepAliveInterval,
   pool,
   waitForNewsletterProcessing: async () => {
@@ -147,6 +198,9 @@ const shutdown = createGracefulShutdown({
   waitForBackgroundTasks: async () => {
     if (marketSnapshotRefresh) {
       await marketSnapshotRefresh;
+    }
+    if (autoNewsImport) {
+      await autoNewsImport.catch(() => {});
     }
   },
 });
