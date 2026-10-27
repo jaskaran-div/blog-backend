@@ -58,6 +58,24 @@ export function createAutoNewsService({
   now = () => new Date(),
   resolveRedirect = resolveTrackingRedirect,
 }) {
+  // en-CA formats as YYYY-MM-DD, so dates compare as plain strings.
+  const calendarDateFormat = new Intl.DateTimeFormat('en-CA', {
+    timeZone: config.timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const calendarDate = (date) => calendarDateFormat.format(date);
+
+  /** Epoch seconds of 00:00 today in the configured timezone (found from the zone's own offset). */
+  function startOfTodaySeconds(date) {
+    const today = calendarDate(date);
+    // Start one day early and step forward to the first instant whose local date is today.
+    let candidate = Date.parse(`${today}T00:00:00Z`) - 18 * 3600 * 1000;
+    while (calendarDate(new Date(candidate)) !== today) candidate += 15 * 60 * 1000;
+    return Math.floor(candidate / 1000);
+  }
+
   const weekdayHourFormat = new Intl.DateTimeFormat('en-US', {
     timeZone: config.timezone,
     weekday: 'short',
@@ -132,8 +150,19 @@ export function createAutoNewsService({
     return rows[0] ?? { slug: record.slug, status: 'duplicate' };
   }
 
-  async function importMessage(messageId, { dryRun, uploadImages = false }) {
+  async function importMessage(messageId, { dryRun, uploadImages = false, today }) {
     const message = await gmail.getMessage(messageId);
+    // Only emails Gmail received on today's calendar date (configured timezone) are eligible.
+    // Older emails are skipped without writing anything, so they can never be published.
+    const receivedAt = new Date(Number(message.internalDate));
+    if (!Number.isFinite(receivedAt.getTime()) || calendarDate(receivedAt) !== today) {
+      return {
+        status: 'skipped-not-today',
+        receivedAt: Number.isFinite(receivedAt.getTime()) ? receivedAt.toISOString() : null,
+        receivedDate: Number.isFinite(receivedAt.getTime()) ? calendarDate(receivedAt) : null,
+        today,
+      };
+    }
     const content = await extractEmailContent(message, {
       loadAttachment: (attachmentId) => gmail.getAttachment(messageId, attachmentId),
     });
@@ -243,7 +272,10 @@ export function createAutoNewsService({
         return { status: 'skipped', reason: 'outside-window', results: [] };
       }
 
-      const query = `from:${config.sender} newer_than:${config.lookbackDays}d`;
+      const runAt = now();
+      const today = calendarDate(runAt);
+      // Gmail's after:<epoch seconds> is exact; the per-message date check below is the real gate.
+      const query = `from:${config.sender} after:${startOfTodaySeconds(runAt)}`;
       // Gmail lists newest first; import oldest first so publication order matches arrival.
       const messageIds = messageId
         ? [String(messageId)]
@@ -271,7 +303,7 @@ export function createAutoNewsService({
           }
         }
         try {
-          results.push({ messageId: id, ...(await importMessage(id, { dryRun, uploadImages })) });
+          results.push({ messageId: id, ...(await importMessage(id, { dryRun, uploadImages, today })) });
         } catch (error) {
           logger.error('Automated news email could not be processed.', {
             messageId: id,

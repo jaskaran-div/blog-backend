@@ -286,7 +286,6 @@ export function loadAutoNewsConfig(env = process.env, { requireCredentials } = {
     days: AUTO_NEWS_DAYS,
     intervalMinutes,
     cronExpression: `*/${intervalMinutes} ${AUTO_NEWS_WINDOW_HOURS.join(',')} * * ${AUTO_NEWS_DAYS}`,
-    lookbackDays: Math.min(positiveInteger(env, 'AUTO_NEWS_LOOKBACK_DAYS', 3), 30),
     maxAttempts: Math.min(positiveInteger(env, 'AUTO_NEWS_MAX_ATTEMPTS', 5), 50),
     gmail,
     cloudinary,

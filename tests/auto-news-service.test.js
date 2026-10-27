@@ -100,7 +100,7 @@ test('imports a sender email as a draft with Cloudinary URLs in place of cid: im
   const result = await service.runImport();
 
   assert.equal(result.status, 'completed');
-  assert.deepEqual(gmail.calls.list, ['from:neil.crammond@zenithwavecapital.com newer_than:3d']);
+  assert.deepEqual(gmail.calls.list, ['from:neil.crammond@zenithwavecapital.com after:1792953000']);
   assert.equal(result.results.length, 1);
   assert.equal(result.results[0].status, 'draft');
 
@@ -296,7 +296,7 @@ function weekendMissive({ id = '1a1738562f2ca8ed' } = {}) {
   return {
     message: {
       id,
-      internalDate: String(Date.parse('2026-10-24T09:00:00Z')),
+      internalDate: String(Date.parse('2026-10-26T04:00:00Z')),
       payload: {
         mimeType: 'multipart/mixed',
         headers: [
@@ -394,4 +394,50 @@ test('dry run for one message previews HTML and metadata, optionally uploads, an
 test('rejects malformed message IDs', async () => {
   const { service } = setup();
   await assert.rejects(service.runImport({ messageId: '../x' }), (error) => error.statusCode === 400);
+});
+
+test('only emails Gmail received on the current IST date are imported; earlier days are never written', async () => {
+  const at = (iso) => {
+    const message = buildMessage({ id: `m${Date.parse(iso)}` });
+    message.internalDate = String(Date.parse(iso));
+    return message;
+  };
+  const messages = [
+    at('2026-10-25T14:44:28Z'), // 25 Oct 20:14 IST: two days ago
+    at('2026-10-25T18:29:59Z'), // 25 Oct 23:59:59 IST: yesterday's last second
+    at('2026-10-25T18:30:00Z'), // 26 Oct 00:00:00 IST: today's first second
+    at('2026-10-26T06:06:06Z'), // 26 Oct 11:36 IST
+  ];
+  const { service, pool, gmail, uploads } = setup({ env: { AUTO_NEWS_AUTO_PUBLISH: 'true' }, messages });
+  const { results } = await service.runImport();
+
+  assert.equal(gmail.calls.list[0], 'from:neil.crammond@zenithwavecapital.com after:1792953000');
+  assert.deepEqual(results.map((item) => item.status), ['skipped-not-today', 'skipped-not-today', 'published', 'published']);
+  assert.equal(results[1].receivedDate, '2026-10-25');
+  assert.equal(results[1].today, '2026-10-26');
+  assert.deepEqual([...pool.rows.keys()].sort(), [messages[2].id, messages[3].id].sort());
+  assert.equal(uploads.length, 2, 'skipped emails never upload images');
+});
+
+test('an explicit message ID from a previous day is skipped too', async () => {
+  const old = buildMessage({ id: 'old' });
+  old.internalDate = String(Date.parse('2026-10-25T09:00:00Z'));
+  const { service, pool } = setup({ messages: [old] });
+
+  const { results: [result] } = await service.runImport({ messageId: 'old' });
+  assert.equal(result.status, 'skipped-not-today');
+  assert.equal(pool.rows.size, 0);
+});
+
+test('today’s email not yet arrived: the check does nothing and a later check imports it once', async () => {
+  const messages = [];
+  const { service, pool, gmail } = setup({ messages });
+  const getMessage = gmail.getMessage;
+  assert.deepEqual((await service.runImport()).results, []);
+
+  messages.push(buildMessage({ id: 'later' }));
+  gmail.getMessage = getMessage;
+  assert.equal((await service.runImport()).results[0].status, 'draft');
+  assert.equal((await service.runImport()).results[0].status, 'already-imported');
+  assert.equal(pool.rows.size, 1);
 });

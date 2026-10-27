@@ -23,7 +23,6 @@ test('defaults keep automated news disabled and unpublished, with no credentials
   assert.equal(config.timezone, 'Asia/Kolkata');
   assert.equal(config.cronExpression, '*/10 13,16 * * 0-5');
   assert.ok(cron.validate(config.cronExpression));
-  assert.equal(config.lookbackDays, 3);
   assert.equal(config.maxAttempts, 5);
 });
 
