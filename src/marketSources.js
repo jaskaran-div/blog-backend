@@ -16,9 +16,12 @@ export const MARKET_FEEDS = [
     currency: 'USD',
     instruments: [
       { id: 'UST2Y', sourceInstrument: 'UST2Y', displayName: '2Y Treasury Yield', min: -5, max: 30 },
+      { id: 'UST10Y', sourceInstrument: 'UST10Y', displayName: '10Y Treasury Yield', min: -5, max: 30 },
     ],
   },
   {
+    // EIA publishes physical spot assessments (Dated Brent, WTI Cushing) several days late.
+    // They differ from the ICE/NYMEX futures prices usually quoted in market news.
     id: 'crude-world',
     url: `${SNAPDATA_BASE_URL}/crude/world/latest.json`,
     dataset: 'crude',
@@ -26,31 +29,37 @@ export const MARKET_FEEDS = [
     unit: 'barrel',
     currency: 'USD',
     instruments: [
-      { id: 'BRENT', sourceInstrument: 'BRENT', displayName: 'Brent Crude', min: 0, max: 1000 },
+      { id: 'BRENT', sourceInstrument: 'BRENT', displayName: 'Brent Spot (EIA)', min: 0, max: 1000 },
       // WTI settled below zero in April 2020, so negative values are valid.
-      { id: 'WTI', sourceInstrument: 'WTI', displayName: 'WTI Crude', min: -200, max: 1000 },
+      { id: 'WTI', sourceInstrument: 'WTI', displayName: 'WTI Spot (EIA)', min: -200, max: 1000 },
     ],
   },
   {
-    // The world gold feed is a monthly World Bank average, so the daily IBJA benchmark is used instead.
-    id: 'gold-in',
-    url: `${SNAPDATA_BASE_URL}/gold/in/latest.json`,
-    dataset: 'gold',
-    scope: 'in',
-    unit: 'gram',
-    currency: 'INR',
+    // ECB euro reference rates (about 14:15 CET), cross-rated to USD pairs by SnapData.
+    // The envelope has no unit, so each instrument names its own quote currency.
+    id: 'fx-world',
+    url: `${SNAPDATA_BASE_URL}/fx/world/latest.json`,
+    dataset: 'fx',
+    scope: 'world',
+    unit: null,
+    currency: null,
     instruments: [
-      { id: 'GOLD_IN_24K', sourceInstrument: 'XAU.24K', displayName: 'Gold 24K (IBJA)', min: 100, max: 1_000_000 },
+      { id: 'USDINR', sourceInstrument: 'USDINR', displayName: 'USD / INR', unit: 'rate', currency: 'INR', min: 40, max: 200 },
+      { id: 'EURUSD', sourceInstrument: 'EURUSD', displayName: 'EUR / USD', unit: 'rate', currency: 'USD', min: 0.5, max: 2 },
+      { id: 'GBPUSD', sourceInstrument: 'GBPUSD', displayName: 'GBP / USD', unit: 'rate', currency: 'USD', min: 0.5, max: 3 },
+      { id: 'USDJPY', sourceInstrument: 'USDJPY', displayName: 'USD / JPY', unit: 'rate', currency: 'JPY', min: 50, max: 400 },
     ],
   },
+  // Not used: gold (SnapData's IBJA values did not match ibja.co on 30 Oct 2026; its world gold
+  // feed is a monthly estimate) and Indian equity indices (NSE/BSE terms forbid redistribution).
 ];
 
 export function instrumentsForFeeds(feeds) {
   return feeds.flatMap((feed) => feed.instruments.map((instrument) => ({
     ...instrument,
     dataset: feed.dataset,
-    unit: feed.unit,
-    currency: feed.currency,
+    unit: instrument.unit ?? feed.unit,
+    currency: instrument.currency ?? feed.currency,
   })));
 }
 
@@ -94,8 +103,13 @@ export function parseMarketFeed(payload, feed, now = new Date()) {
   if (payload.resolution !== 'daily') {
     throw new MarketDataError('UNEXPECTED_RESOLUTION', `Expected daily data, received ${String(payload.resolution)}.`);
   }
-  if (payload.unit?.quantity !== feed.unit || payload.unit?.currency !== feed.currency) {
-    throw new MarketDataError('UNEXPECTED_UNIT', `Expected ${feed.currency} per ${feed.unit}.`);
+  const unitMatches = feed.unit === null
+    ? payload.unit == null
+    : payload.unit?.quantity === feed.unit && payload.unit?.currency === feed.currency;
+  if (!unitMatches) {
+    throw new MarketDataError('UNEXPECTED_UNIT', feed.unit === null
+      ? 'Expected no envelope unit.'
+      : `Expected ${feed.currency} per ${feed.unit}.`);
   }
   if (!Array.isArray(payload.observations)) {
     throw new MarketDataError('INVALID_PAYLOAD', 'Response has no observations array.');
@@ -153,8 +167,8 @@ export function parseMarketFeed(payload, feed, now = new Date()) {
         previousClose,
         change,
         changePercent,
-        unit: feed.unit,
-        currency: feed.currency,
+        unit: instrument.unit ?? feed.unit,
+        currency: instrument.currency ?? feed.currency,
         sourceId: source.id.slice(0, 40),
         sourceName: typeof source.name === 'string' ? source.name.slice(0, 200) : null,
         sourceUrl: typeof source.url === 'string' && /^https:\/\//.test(source.url) ? source.url.slice(0, 300) : null,

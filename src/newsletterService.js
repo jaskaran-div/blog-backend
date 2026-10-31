@@ -349,7 +349,7 @@ export function createNewsletterService({ pool, emailService, config, logger = c
       const html = appendUnsubscribeLink(
         newsletter.html_content,
         createUnsubscribeToken(subscriber.id, subscriber.unsubscribe_token, config.tokenSecret),
-        config.apiPublicUrl,
+        config.siteUrl,
       );
       await emailService.sendEmail({
         to: subscriber.email,

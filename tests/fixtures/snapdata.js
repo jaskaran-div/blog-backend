@@ -33,36 +33,23 @@ export function crudePayload(overrides = {}) {
   };
 }
 
-export function goldInPayload(overrides = {}) {
+// FX has no envelope unit; values are ECB reference rates cross-rated to USD pairs.
+export function fxPayload(overrides = {}) {
   return {
     schema_version: '1.0',
-    generated_at: '2026-10-19T06:30:00Z',
-    dataset: 'gold',
-    scope: 'in',
+    generated_at: '2026-10-30T15:30:00Z',
+    dataset: 'fx',
+    scope: 'world',
     resolution: 'daily',
-    unit: { quantity: 'gram', currency: 'INR' },
-    sources: [{ id: 'ibja', name: 'India Bullion and Jewellers Association (IBJA)', url: 'https://ibja.co/' }],
+    unit: null,
+    sources: [{ id: 'ecb', name: 'European Central Bank reference rates', url: 'https://www.ecb.europa.eu/stats/eurofxref/' }],
     observations: [
-      { date: '2026-10-19', instrument: 'XAU.22K', value: 13570, prev_close: 13535, change_pct: 0.2586, status: 'provisional', filled_from: null, source: 'ibja' },
-      { date: '2026-10-19', instrument: 'XAU.24K', value: 14804, prev_close: 14766, change_pct: 0.2573, status: 'provisional', filled_from: null, source: 'ibja' },
+      { date: '2026-10-30', instrument: 'EURUSD', value: 1.1172, prev_close: 1.113, change_pct: 0.3774, status: 'provisional', filled_from: null, source: 'ecb' },
+      { date: '2026-10-30', instrument: 'GBPUSD', value: 1.3399, prev_close: 1.3317, change_pct: 0.6158, status: 'provisional', filled_from: null, source: 'ecb' },
+      { date: '2026-10-30', instrument: 'USDINR', value: 94.9552, prev_close: 95.2691, change_pct: -0.3295, status: 'provisional', filled_from: null, source: 'ecb' },
+      { date: '2026-10-30', instrument: 'USDJPY', value: 157.2503, prev_close: 158.0593, change_pct: -0.5118, status: 'provisional', filled_from: null, source: 'ecb' },
     ],
     ...overrides,
-  };
-}
-
-// The world gold feed is a monthly, gap-filled World Bank average.
-export function goldWorldMonthlyPayload() {
-  return {
-    schema_version: '1.0',
-    generated_at: '2026-10-20T18:30:00Z',
-    dataset: 'gold',
-    scope: 'world',
-    resolution: 'monthly',
-    unit: { quantity: 'troy_ounce', currency: 'USD' },
-    sources: [{ id: 'worldbank', name: 'World Bank Commodity Price Data (Pink Sheet)' }],
-    observations: [
-      { date: '2026-10-21', instrument: 'XAU.SPOT', value: 4319, prev_close: null, change_pct: null, status: 'estimated', filled_from: '2026-09-01', source: 'worldbank' },
-    ],
   };
 }
 

@@ -135,7 +135,7 @@ test('verification returns an HTML page and unsubscribe asks for confirmation be
     body: JSON.stringify({ confirmed: true }),
   });
   assert.equal(confirmed.status, 200);
-  assert.match(await confirmed.text(), /Your email address has been removed/);
+  assert.match(await confirmed.text(), /You have been unsubscribed/);
 });
 
 test('test endpoints require the admin token', async () => {

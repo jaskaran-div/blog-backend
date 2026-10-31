@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createMarketSnapshotService } from '../src/marketSnapshotService.js';
-import { crudePayload, goldInPayload, jsonResponse, ratesPayload, snapDataFetch } from './fixtures/snapdata.js';
+import { crudePayload, fxPayload, jsonResponse, ratesPayload, snapDataFetch } from './fixtures/snapdata.js';
 
 const config = {
   marketSnapshot: {
@@ -107,7 +107,7 @@ function healthyFetch() {
   return snapDataFetch({
     '/rates/world/': async () => jsonResponse(ratesPayload()),
     '/crude/world/': async () => jsonResponse(crudePayload()),
-    '/gold/in/': async () => jsonResponse(goldInPayload()),
+    '/fx/world/': async () => jsonResponse(fxPayload()),
   });
 }
 
@@ -118,8 +118,8 @@ test('refresh stores every instrument and records a succeeded run', async () => 
   const result = await service.refresh({ trigger: 'manual' });
 
   assert.equal(result.status, 'succeeded');
-  assert.equal(result.updated, 4);
-  assert.deepEqual([...pool.state.snapshots.keys()].sort(), ['BRENT', 'GOLD_IN_24K', 'UST2Y', 'WTI']);
+  assert.equal(result.updated, 8);
+  assert.deepEqual([...pool.state.snapshots.keys()].sort(), ['BRENT', 'EURUSD', 'GBPUSD', 'USDINR', 'USDJPY', 'UST10Y', 'UST2Y', 'WTI']);
   assert.equal(pool.state.runs[0].status, 'succeeded');
   assert.equal(pool.state.runs[0].run_trigger, 'manual');
   assert.equal(pool.state.lockHeld, false);
@@ -138,13 +138,13 @@ test('a failing source preserves the last successful snapshot and other sources 
   const failingCrude = snapDataFetch({
     '/rates/world/': async () => jsonResponse(newerRates),
     '/crude/world/': async () => { throw Object.assign(new Error('timed out'), { name: 'TimeoutError' }); },
-    '/gold/in/': async () => jsonResponse({ ...goldInPayload(), observations: [] }),
+    '/fx/world/': async () => jsonResponse({ ...fxPayload(), observations: [] }),
   });
   const result = await createMarketSnapshotService({ pool, config, fetchImpl: failingCrude, logger: silentLogger })
     .refresh({ force: true });
 
   assert.equal(result.status, 'partial');
-  assert.equal(result.updated, 1);
+  assert.equal(result.updated, 2);
   const brent = pool.state.snapshots.get('BRENT');
   assert.equal(brent.value, brentBefore.value, 'Brent value must be preserved');
   assert.equal(brent.data_date, brentBefore.data_date);
@@ -153,7 +153,8 @@ test('a failing source preserves the last successful snapshot and other sources 
   assert.match(brent.last_error, /^TIMEOUT/);
   assert.equal(brent.consecutive_failures, 1);
   assert.equal(pool.state.snapshots.get('UST2Y').value, '4.81');
-  assert.equal(pool.state.snapshots.get('GOLD_IN_24K').value, '14804');
+  assert.equal(pool.state.snapshots.get('USDINR').value, '94.9552', 'USD/INR value must be preserved');
+  assert.match(pool.state.snapshots.get('USDINR').last_error, /^MISSING_INSTRUMENT/);
   assert.equal(pool.state.runs[1].status, 'partial');
 });
 
@@ -167,7 +168,7 @@ test('older source data never replaces a newer stored observation', async () => 
   const fetchImpl = snapDataFetch({
     '/rates/world/': async () => jsonResponse(olderRates),
     '/crude/world/': async () => jsonResponse(crudePayload()),
-    '/gold/in/': async () => jsonResponse(goldInPayload()),
+    '/fx/world/': async () => jsonResponse(fxPayload()),
   });
   const result = await createMarketSnapshotService({ pool, config, fetchImpl, logger: silentLogger })
     .refresh({ force: true });
@@ -203,13 +204,14 @@ test('latest snapshot reads stored rows only and reports unavailable, partial an
   assert.equal(empty.status, 'unavailable');
   assert.equal(empty.realtime, false);
   assert.equal(empty.snapshotUpdatedAt, null);
-  assert.deepEqual(empty.instruments.map((item) => item.status), ['unavailable', 'unavailable', 'unavailable', 'unavailable']);
+  assert.equal(empty.instruments.length, 8);
+  assert.ok(empty.instruments.every((item) => item.status === 'unavailable'));
   assert.ok(empty.instruments.every((item) => item.value === null && item.change === null));
 
   const partialFetch = snapDataFetch({
     '/rates/world/': async () => jsonResponse(ratesPayload()),
     '/crude/world/': async () => jsonResponse({}, { status: 500 }),
-    '/gold/in/': async () => jsonResponse(goldInPayload()),
+    '/fx/world/': async () => jsonResponse(fxPayload()),
   });
   await createMarketSnapshotService({ pool, config, fetchImpl: partialFetch, logger: silentLogger }).refresh();
   const fetchedAt = pool.state.snapshots.get('UST2Y').fetched_at;

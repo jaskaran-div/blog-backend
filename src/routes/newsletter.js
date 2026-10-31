@@ -54,7 +54,7 @@ export function createNewsletterRouter({ newsletterService, emailService, config
       response
         .status(400)
         .type('html')
-        .send(htmlPage('Confirmation required', 'Confirm that you want to remove your email address from the newsletter.'));
+        .send(htmlPage('Confirmation required', 'Confirm that you want to unsubscribe from the newsletter.'));
       return;
     }
 
@@ -63,7 +63,7 @@ export function createNewsletterRouter({ newsletterService, emailService, config
       .status(result.ok ? 200 : 400)
       .type('html')
       .send(result.ok
-        ? htmlPage('Unsubscribed', 'Your email address has been removed. You will no longer receive the DerivionAcademy newsletter.')
+        ? htmlPage('Unsubscribed', 'You have been unsubscribed. You will no longer receive the DerivionAcademy newsletter.')
         : htmlPage('Unsubscribe link invalid', 'This unsubscribe link is invalid.'));
   }));
 
