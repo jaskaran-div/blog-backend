@@ -8,11 +8,15 @@ import { createNewsletterService } from '../src/newsletterService.js';
 const config = loadConfig();
 const pool = createDatabase(config);
 const args = process.argv.slice(2);
-const resend = args.includes('--resend');
+const onlyArg = args.find((argument) => argument.startsWith('--only='));
+const onlyEmail = onlyArg ? onlyArg.slice('--only='.length).trim().toLowerCase() : null;
+// A single-recipient send is always its own campaign so it never marks the real one as sent.
+const resend = args.includes('--resend') || Boolean(onlyEmail);
 
 try {
-  if (args.some((argument) => argument !== '--resend')) {
-    throw new Error('Usage: npm run newsletter:send [-- --resend]');
+  if (args.some((argument) => argument !== '--resend' && !argument.startsWith('--only='))
+    || (onlyArg && !onlyEmail)) {
+    throw new Error('Usage: npm run newsletter:send [-- --resend] [--only=email@example.com]');
   }
 
   const htmlContent = await readFile(
@@ -58,6 +62,7 @@ try {
       subject: 'ISFT Weekly Newsletter | 30 Oct 2026',
       htmlContent,
       resend,
+      onlyEmail,
     });
 
     console.info('Newsletter send finished', result);

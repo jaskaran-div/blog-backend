@@ -216,7 +216,7 @@ export function createNewsletterService({ pool, emailService, config, logger = c
     }
   }
 
-  async function sendNewsletterNow({ title, subject, htmlContent, resend = false }) {
+  async function sendNewsletterNow({ title, subject, htmlContent, resend = false, onlyEmail = null }) {
     if (typeof title !== 'string' || !title.trim() || title.length > MAX_TITLE_LENGTH) {
       throw new Error(`Title must be between 1 and ${MAX_TITLE_LENGTH} characters.`);
     }
@@ -312,7 +312,7 @@ export function createNewsletterService({ pool, emailService, config, logger = c
     }
 
     try {
-      return { newsletterId: newsletter.id, ...(await sendNewsletter(newsletter)) };
+      return { newsletterId: newsletter.id, ...(await sendNewsletter(newsletter, onlyEmail)) };
     } catch (error) {
       await pool.query(
         `UPDATE newsletters
@@ -382,7 +382,7 @@ export function createNewsletterService({ pool, emailService, config, logger = c
     }
   }
 
-  async function sendNewsletter(newsletter) {
+  async function sendNewsletter(newsletter, onlyEmail = null) {
     if (typeof newsletter.title !== 'string' || newsletter.title.length > MAX_TITLE_LENGTH
       || typeof newsletter.subject !== 'string' || newsletter.subject.length > MAX_SUBJECT_LENGTH
       || !isValidHtml(newsletter.html_content)) {
@@ -399,6 +399,7 @@ export function createNewsletterService({ pool, emailService, config, logger = c
          FROM subscribers AS subscriber
          WHERE subscriber.status = 'active'
            AND subscriber.id > $1
+           AND ($4::text IS NULL OR subscriber.email = $4)
            AND NOT EXISTS (
              SELECT 1
              FROM newsletter_deliveries AS delivery
@@ -408,7 +409,7 @@ export function createNewsletterService({ pool, emailService, config, logger = c
            )
          ORDER BY subscriber.id
          LIMIT $3`,
-        [lastSubscriberId, newsletter.id, config.batchSize],
+        [lastSubscriberId, newsletter.id, config.batchSize, onlyEmail ? normalizeEmail(onlyEmail) : null],
       );
       const subscribers = subscribersResult.rows;
 

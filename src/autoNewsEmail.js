@@ -328,6 +328,9 @@ export function stripMailingListFooter(sanitizedHtml) {
 }
 
 const TRACKING_HOSTS = [/(^|\.)clicks\.aweber\.com$/i];
+// Per-subscriber newsletter links (MNI's enews.marketnews.com). They are never followed, because
+// that would register clicks against the recipient's account; the link text is kept without an href.
+const DROPPED_LINK_HOSTS = [/(^|\.)enews\.marketnews\.com$/i];
 
 function unwrapSafeLink(url) {
   if (!/(^|\.)safelinks\.protection\.outlook\.com$/i.test(url.hostname)) return url;
@@ -347,15 +350,15 @@ function withoutUtm(url) {
 
 /**
  * Rewrites links for public pages: unwraps Outlook safelinks, resolves known click trackers to their
- * destination with `resolveRedirect(url) -> string | null`, and drops utm_* parameters. A link that
- * cannot be made clean loses its href but keeps its text.
+ * destination with `resolveRedirect(url) -> string | null`, drops per-subscriber newsletter links and
+ * utm_* parameters. A link that cannot be made clean loses its href but keeps its text.
  */
 export async function cleanTrackingLinks(sanitizedHtml, { resolveRedirect }) {
   const hrefs = new Set([...sanitizedHtml.matchAll(/href="([^"]*)"/g)].map((match) => match[1]));
   const cleaned = new Map();
   await Promise.all([...hrefs].map(async (encoded) => {
     const raw = decodeEntities(encoded);
-    if (/^mailto:/i.test(raw) || !/safelinks\.protection\.outlook\.com|clicks\.aweber\.com|[?&]utm_/i.test(raw)) {
+    if (/^mailto:/i.test(raw) || !/safelinks\.protection\.outlook\.com|clicks\.aweber\.com|enews\.marketnews\.com|[?&]utm_/i.test(raw)) {
       // Nothing to clean: keep the link exactly as written.
       cleaned.set(encoded, encoded);
       return;
@@ -363,6 +366,7 @@ export async function cleanTrackingLinks(sanitizedHtml, { resolveRedirect }) {
     let url;
     try {
       url = unwrapSafeLink(new URL(raw));
+      if (url && DROPPED_LINK_HOSTS.some((host) => host.test(url.hostname))) url = null;
       if (url && TRACKING_HOSTS.some((host) => host.test(url.hostname))) {
         const destination = await resolveRedirect(url.href);
         url = destination ? unwrapSafeLink(new URL(destination)) : null;
@@ -371,7 +375,7 @@ export async function cleanTrackingLinks(sanitizedHtml, { resolveRedirect }) {
       url = null;
     }
     const safe = url && ['http:', 'https:'].includes(url.protocol)
-      && !TRACKING_HOSTS.some((host) => host.test(url.hostname));
+      && ![...TRACKING_HOSTS, ...DROPPED_LINK_HOSTS].some((host) => host.test(url.hostname));
     cleaned.set(encoded, safe ? withoutUtm(url).href.replace(/&/g, '&amp;').replace(/"/g, '&quot;') : null);
   }));
   return sanitizedHtml.replace(/ href="([^"]*)"/g, (match, encoded) => {

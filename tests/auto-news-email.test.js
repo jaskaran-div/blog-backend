@@ -235,6 +235,18 @@ test('unwraps safelinks, resolves AWeber trackers, drops utm params and unresolv
   assert.deepEqual(resolved.sort(), [aweber('dead'), aweber('ok')]);
 });
 
+test('drops per-subscriber enews.marketnews.com links without fetching them, keeps their text', async () => {
+  const html = '<a href="https://enews.marketnews.com/ct/x123/abc?utm_source=mni">MNI story</a>'
+    + `<a href="https://emea01.safelinks.protection.outlook.com/?url=${encodeURIComponent('https://enews.marketnews.com/ct/y')}">Wrapped</a>`
+    + '<a href="https://www.marketnews.com/fed-story">Public</a>';
+  const cleaned = await cleanTrackingLinks(html, {
+    async resolveRedirect() {
+      throw new Error('subscriber links must not be followed');
+    },
+  });
+  assert.equal(cleaned, '<a>MNI story</a><a>Wrapped</a><a href="https://www.marketnews.com/fed-story">Public</a>');
+});
+
 test('drops Outlook "Protected by Outlook" tooltips that expose tracking URLs, keeps normal titles', () => {
   const html = sanitizeNewsHtml('<a href="https://ft.com/a" title="Protected by Outlook: https://clicks.aweber.com/y/ct/?l=1. Click or tap to follow the link.">FT</a><a href="https://ft.com/b" title="Read more">B</a>');
   assert.doesNotMatch(html, /aweber|Protected by Outlook/);
