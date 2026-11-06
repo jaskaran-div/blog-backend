@@ -20,7 +20,7 @@ try {
   }
 
   const htmlContent = await readFile(
-    new URL('../../frontend/public/Newsletter/isft-weekly-newsletter-week-44.html', import.meta.url),
+    new URL('../../frontend/public/Newsletter/isft-weekly-newsletter-week-45.html', import.meta.url),
     'utf8',
   );
   const { rows } = await pool.query(
@@ -58,8 +58,8 @@ try {
       config,
     });
     const result = await newsletterService.sendNewsletterNow({
-      title: 'ISFT Weekly Newsletter — 30 Oct 2026',
-      subject: 'ISFT Weekly Newsletter | 30 Oct 2026',
+      title: 'ISFT Horizon Weekly Briefing — 06 Nov 2026',
+      subject: 'ISFT Horizon Weekly Briefing | 06 Nov 2026',
       htmlContent,
       resend,
       onlyEmail,

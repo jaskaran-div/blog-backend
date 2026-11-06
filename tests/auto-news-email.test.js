@@ -157,6 +157,13 @@ test('accepts the exact configured Google Workspace DKIM domain when its signatu
   assert.equal(isAuthenticatedSender(workspaceSigned(), SENDER, trusted), true);
 });
 
+test('accepts Gmail quoting header.b when the prefix contains "/" (6 November Missive)', () => {
+  const signed = workspaceSigned({ resultB: '"JjRr2s/8"', signatureB: 'JjRr2s/8QmZ2restOfSignature==' });
+  assert.equal(isAuthenticatedSender(signed, SENDER, trusted), true);
+  const mismatched = workspaceSigned({ resultB: '"JjRr2s/8"', signatureB: 'ZZZZZZZZother' });
+  assert.equal(isAuthenticatedSender(mismatched, SENDER, trusted), false, 'quoted prefix must still match');
+});
+
 test('Workspace DKIM is rejected unless that exact domain is configured', () => {
   assert.equal(isAuthenticatedSender(workspaceSigned(), SENDER), false, 'not configured');
   assert.equal(isAuthenticatedSender(workspaceSigned(), SENDER, { trustedDkimDomains: ['other-com.1.gappssmtp.com'] }), false);

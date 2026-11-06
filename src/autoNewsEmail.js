@@ -101,7 +101,11 @@ export function isAuthenticatedSender(payload, sender, { trustedDkimDomains = []
   if (!/^\s*mx\.google\.com\s*;/i.test(value)) return false;
 
   const clauses = value.split(';').map((clause) => clause.trim());
-  const property = (clause, name) => clause.match(new RegExp(`(?:^|\\s)header\\.${name}=([^\\s;()]+)`, 'i'))?.[1]?.toLowerCase();
+  // Gmail quotes values containing '/' or '+' (e.g. header.b="JjRr2s/8"), so drop surrounding quotes.
+  const property = (clause, name) => clause
+    .match(new RegExp(`(?:^|\\s)header\\.${name}=("[^"]*"|[^\\s;()]+)`, 'i'))?.[1]
+    ?.replace(/^"(.*)"$/, '$1')
+    .toLowerCase();
 
   if (clauses.some((clause) => /^dmarc=pass\b/i.test(clause) && property(clause, 'from') === domain)) {
     return true;
