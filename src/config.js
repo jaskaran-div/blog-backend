@@ -183,10 +183,12 @@ export function loadMarketSnapshotConfig(env = process.env) {
   };
 }
 
-// Gmail checks run inside the 13:00-13:59 and 16:00-16:59 IST hours, Sunday (0) to Friday (5).
+// Gmail checks run every day from 12:00 to 22:59 IST. Weekday missives land ~11:30 IST, but the
+// weekend missive has arrived on Saturday 15:12 and Sunday 16:32/20:14, and only same-day emails are
+// eligible, so a narrower window or a skipped day loses that day's post for good.
 export const AUTO_NEWS_TIMEZONE = 'Asia/Kolkata';
-export const AUTO_NEWS_WINDOW_HOURS = [13, 16];
-export const AUTO_NEWS_DAYS = '0-5';
+export const AUTO_NEWS_WINDOW_HOURS = [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22];
+export const AUTO_NEWS_DAYS = '*';
 
 export function loadAutoNewsConfig(env = process.env, { requireCredentials } = {}) {
   const enabled = booleanFlag(env, 'AUTO_NEWS_ENABLED', false);
@@ -285,7 +287,7 @@ export function loadAutoNewsConfig(env = process.env, { requireCredentials } = {
     windowHours: AUTO_NEWS_WINDOW_HOURS,
     days: AUTO_NEWS_DAYS,
     intervalMinutes,
-    cronExpression: `*/${intervalMinutes} ${AUTO_NEWS_WINDOW_HOURS.join(',')} * * ${AUTO_NEWS_DAYS}`,
+    cronExpression: `*/${intervalMinutes} ${AUTO_NEWS_WINDOW_HOURS[0]}-${AUTO_NEWS_WINDOW_HOURS.at(-1)} * * ${AUTO_NEWS_DAYS}`,
     maxAttempts: Math.min(positiveInteger(env, 'AUTO_NEWS_MAX_ATTEMPTS', 5), 50),
     gmail,
     cloudinary,

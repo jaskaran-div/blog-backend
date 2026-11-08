@@ -258,23 +258,21 @@ test('one malformed message does not stop the rest of the run', async () => {
   assert.deepEqual(results.map((item) => [item.messageId, item.status]), [['bad', 'error'], ['good', 'draft']]);
 });
 
-test('checks run only 13:00-13:59 and 16:00-16:59 IST, Sunday to Friday', () => {
+test('checks run 12:00-22:59 IST every day, including the weekend', () => {
   const { service } = setup();
   const at = (iso) => service.isWithinImportWindow(new Date(iso));
 
-  assert.equal(at('2026-10-25T07:30:00Z'), true, 'Sunday 13:00 IST');
-  assert.equal(at('2026-10-26T08:29:59Z'), true, 'Monday 13:59 IST');
-  assert.equal(at('2026-10-26T08:30:00Z'), false, 'Monday 14:00 IST');
-  assert.equal(at('2026-10-26T09:30:00Z'), false, 'Monday 15:00 IST');
-  assert.equal(at('2026-10-30T10:30:00Z'), true, 'Friday 16:00 IST');
-  assert.equal(at('2026-10-30T11:29:00Z'), true, 'Friday 16:59 IST');
-  assert.equal(at('2026-10-30T11:30:00Z'), false, 'Friday 17:00 IST');
-  assert.equal(at('2026-10-31T07:45:00Z'), false, 'Saturday 13:15 IST');
-  assert.equal(at('2026-10-31T10:45:00Z'), false, 'Saturday 16:15 IST');
+  assert.equal(at('2026-10-26T06:29:59Z'), false, 'Monday 11:59 IST');
+  assert.equal(at('2026-10-26T06:30:00Z'), true, 'Monday 12:00 IST');
+  assert.equal(at('2026-10-26T09:30:00Z'), true, 'Monday 15:00 IST');
+  assert.equal(at('2026-10-30T17:29:59Z'), true, 'Friday 22:59 IST');
+  assert.equal(at('2026-10-30T17:30:00Z'), false, 'Friday 23:00 IST');
+  assert.equal(at('2026-11-07T09:45:00Z'), true, 'Saturday 15:15 IST (7 Nov weekend missive)');
+  assert.equal(at('2026-10-25T14:50:00Z'), true, 'Sunday 20:20 IST (25 Oct weekend missive)');
 });
 
 test('scheduled runs outside the window do not contact Gmail; forced runs do', async () => {
-  const { service, gmail } = setup({ now: () => new Date('2026-10-31T07:45:00Z') });
+  const { service, gmail } = setup({ now: () => new Date('2026-10-31T02:00:00Z') });
 
   assert.deepEqual(await service.runImport(), { status: 'skipped', reason: 'outside-window', results: [] });
   assert.equal(gmail.calls.list.length, 0);

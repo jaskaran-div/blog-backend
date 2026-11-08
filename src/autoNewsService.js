@@ -76,16 +76,15 @@ export function createAutoNewsService({
     return Math.floor(candidate / 1000);
   }
 
-  const weekdayHourFormat = new Intl.DateTimeFormat('en-US', {
+  const hourFormat = new Intl.DateTimeFormat('en-US', {
     timeZone: config.timezone,
-    weekday: 'short',
     hour: 'numeric',
     hourCycle: 'h23',
   });
 
   function isWithinImportWindow(date = now()) {
-    const parts = Object.fromEntries(weekdayHourFormat.formatToParts(date).map((part) => [part.type, part.value]));
-    return parts.weekday !== 'Sat' && config.windowHours.includes(Number(parts.hour));
+    const hour = hourFormat.formatToParts(date).find((part) => part.type === 'hour')?.value;
+    return config.windowHours.includes(Number(hour));
   }
 
   async function uploadWithRetry(image, messageId, contentId) {

@@ -21,7 +21,7 @@ test('defaults keep automated news disabled and unpublished, with no credentials
   assert.equal(config.sender, 'neil.crammond@zenithwavecapital.com');
   assert.equal(config.requireSenderAuth, true);
   assert.equal(config.timezone, 'Asia/Kolkata');
-  assert.equal(config.cronExpression, '*/10 13,16 * * 0-5');
+  assert.equal(config.cronExpression, '*/10 12-22 * * *');
   assert.ok(cron.validate(config.cronExpression));
   assert.equal(config.maxAttempts, 5);
 });
@@ -54,7 +54,7 @@ test('validates the import token length, sender, interval and folder', () => {
   assert.throws(() => loadAutoNewsConfig({ AUTO_NEWS_SENDER: 'not-an-email' }), /AUTO_NEWS_SENDER/);
   assert.equal(loadAutoNewsConfig({ AUTO_NEWS_SENDER: ' Neil.Crammond@ZenithWaveCapital.com ' }).sender,
     'neil.crammond@zenithwavecapital.com');
-  assert.equal(loadAutoNewsConfig({ AUTO_NEWS_CHECK_INTERVAL_MINUTES: '15' }).cronExpression, '*/15 13,16 * * 0-5');
+  assert.equal(loadAutoNewsConfig({ AUTO_NEWS_CHECK_INTERVAL_MINUTES: '15' }).cronExpression, '*/15 12-22 * * *');
   assert.equal(loadAutoNewsConfig({ AUTO_NEWS_CHECK_INTERVAL_MINUTES: '600' }).intervalMinutes, 60);
   assert.throws(() => loadAutoNewsConfig({ AUTO_NEWS_CHECK_INTERVAL_MINUTES: '0' }), /positive integer/);
   assert.throws(() => loadAutoNewsConfig({ AUTO_NEWS_CLOUDINARY_FOLDER: '../x' }), /AUTO_NEWS_CLOUDINARY_FOLDER/);
